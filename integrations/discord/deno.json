@@ -1,0 +1,12 @@
+{
+	"fmt": {
+		"bracePosition": "sameLine",
+		"indentWidth": 4,
+		"lineWidth": 200,
+		"semiColons": false,
+		"useTabs": true,
+		"quoteProps": "consistent",
+		"operatorPosition": "nextLine",
+		"singleQuote": false
+	}
+}

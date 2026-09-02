@@ -1,0 +1,15 @@
+[versions]
+# The version for launching Monifactory with Forge. Every project that runs inside Monifactory must use this.
+java = "17"
+# These come from the pack's manifest, but Gradle needs to know at configuration time.
+# (Do not worry reader, I am asserting these match as soon as the manifest is downloaded.)
+minecraft = "1.20.1"
+forge = "47.4.13"
+
+[libraries]
+
+[bundles]
+
+[plugins]
+forgegradle = { id = "net.minecraftforge.gradle", version = "7.0.36" }
+renamer = { id = "net.minecraftforge.renamer", version = "1.1.7" }

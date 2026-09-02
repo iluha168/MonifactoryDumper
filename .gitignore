@@ -1,0 +1,10 @@
+# IDEs
+.vscode
+.idea
+
+# Gradle
+.gradle/
+build/
+
+# Duh
+.env
