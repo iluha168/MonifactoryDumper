@@ -5,8 +5,21 @@ java = "17"
 # (Do not worry reader, I am asserting these match as soon as the manifest is downloaded.)
 minecraft = "1.20.1"
 forge = "47.4.13"
+# The CurseForge project id of the main Monifactory pack. 1369485 is the Moni&ProjectE variant.
+modpack-curseforge = "1004602"
+# JSON, for reading the pack manifest and the CurseForge replies.
+gson = "2.14.0"
+# Forge's own tools, driven through their command lines rather than reimplemented.
+# The Mavenizer gathers the vanilla files; Slime Launcher fetches assets and starts the game.
+mavenizer = "0.5.21"
+# The Mavenizer ships class file version 69, so it needs a JVM far newer than the game's.
+mavenizer-java = "25"
+slime = "0.2.3"
 
 [libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+mavenizer = { module = "net.minecraftforge:minecraft-mavenizer", version.ref = "mavenizer" }
+slime-launcher = { module = "net.minecraftforge:slime-launcher", version.ref = "slime" }
 
 [bundles]
 
