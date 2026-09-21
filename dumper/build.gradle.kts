@@ -402,6 +402,10 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
 /** Where the renderer mod writes. */
 val renderDir = layout.buildDirectory.dir("render")
 
+/** How many recipes runGame renders, and the seed that picks them. The mod defaults to 1 and 0. */
+val sampleCount = providers.gradleProperty("monifactory.sample.count")
+val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
+
 val runGame = tasks.register<Exec>("runGame") {
     group = "modpack"
     description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
@@ -410,9 +414,12 @@ val runGame = tasks.register<Exec>("runGame") {
 
     val instance = instanceDir.get().asFile
     val natives = nativesDir.get().asFile
+    val render = renderDir.get().asFile
     doFirst {
         instance.mkdirs()
         natives.mkdirs()
+        // Every run writes a whole set; a PNG left over from the last one would pass for part of this one.
+        render.deleteRecursively()
     }
     doFirst(HeadlessInstance(instance))
 
@@ -420,6 +427,10 @@ val runGame = tasks.register<Exec>("runGame") {
     executable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
     // Before the argfile, since everything after its main class is an argument to the game.
     args("-Dmonifactory.dumper.output=" + renderDir.get().asFile.absolutePath)
+    // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 for the M1
+    // dev-versus-production diff. The same seed picks the same recipes in any boot.
+    sampleCount.orNull?.let { args("-Dmonifactory.dumper.count=$it") }
+    sampleSeed.orNull?.let { args("-Dmonifactory.dumper.seed=$it") }
     argumentProviders.add(ArgFile(launchArgs))
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack

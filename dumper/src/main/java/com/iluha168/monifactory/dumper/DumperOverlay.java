@@ -1,9 +1,6 @@
 package com.iluha168.monifactory.dumper;
 
-import com.mojang.blaze3d.platform.NativeImage;
 import dev.emi.emi.api.EmiApi;
-import dev.emi.emi.api.recipe.EmiRecipe;
-import dev.emi.emi.api.recipe.EmiRecipeCategory;
 import dev.emi.emi.runtime.EmiReloadManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -15,11 +12,7 @@ import net.minecraftforge.fml.loading.FMLPaths;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL43;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -35,26 +28,26 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  */
 final class DumperOverlay extends Overlay {
     private static final long EMI_TIMEOUT = TimeUnit.MINUTES.toMillis(15);
-    /**
-     * Where the fake clock stands for a single still frame. Any fixed value will do; this one is the prototype's, so
-     * its renders compare.
-     */
-    private static final long STILL_FRAME_MILLIS = 2_000_000L;
 
     private enum Step { BOOT, SERVER_RELOAD, JOIN, EMI, RENDER, EXIT, DONE }
 
     private final Minecraft minecraft;
     private final ReloadInstance bootReload;
     private final Path output;
+    private final long seed;
+    private final int count;
 
     private Step step = Step.BOOT;
     private CompletableFuture<DataPlane.Server> serverReload;
     private long emiSince;
+    private Sample sample;
 
-    DumperOverlay(Minecraft minecraft, ReloadInstance bootReload, Path output) {
+    DumperOverlay(Minecraft minecraft, ReloadInstance bootReload, Path output, long seed, int count) {
         this.minecraft = minecraft;
         this.bootReload = bootReload;
         this.output = output;
+        this.seed = seed;
+        this.count = count;
     }
 
     @Override
@@ -108,11 +101,11 @@ final class DumperOverlay extends Overlay {
                     return Step.EMI;
                 }
                 LOG.info("[dumper] EMI loaded in {} ms", System.currentTimeMillis() - emiSince);
+                sample = Sample.choose(minecraft, EmiApi.getRecipeManager(), output, seed, count);
                 return Step.RENDER;
             }
             case RENDER -> {
-                renderFirstRecipe();
-                return Step.EXIT;
+                return sample.advance() ? Step.EXIT : Step.RENDER;
             }
             case EXIT -> {
                 // Ends the game loop after this frame. Main.main then runs Minecraft.destroy(), which exits with 0.
@@ -122,42 +115,6 @@ final class DumperOverlay extends Overlay {
             default -> {
                 return Step.DONE;
             }
-        }
-    }
-
-    private void renderFirstRecipe() throws Exception {
-        var recipes = EmiApi.getRecipeManager();
-        // TooManyRecipeViewers lists some categories twice with the same recipe objects in both, so recipes are
-        // told apart by identity.
-        Set<EmiRecipe> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
-        EmiRecipe first = null;
-        EmiRecipeCategory firstCategory = null;
-        int listed = 0;
-        for (EmiRecipeCategory category : recipes.getCategories()) {
-            for (EmiRecipe recipe : recipes.getRecipes(category)) {
-                listed++;
-                distinct.add(recipe);
-                if (first == null) {
-                    first = recipe;
-                    firstCategory = category;
-                }
-            }
-        }
-        LOG.info("[dumper] EMI lists {} categories, {} recipes, {} distinct",
-                recipes.getCategories().size(), listed, distinct.size());
-        if (first == null) {
-            throw new IllegalStateException("EMI has no recipes");
-        }
-
-        Files.createDirectories(output);
-        String id = first.getId() == null ? "unnamed" : first.getId().toString();
-        Path png = output.resolve(id.replaceAll("[^A-Za-z0-9._-]", "_") + ".png");
-        try (NativeImage image = RecipeRenderer.render(minecraft, first, STILL_FRAME_MILLIS)) {
-            long hash = RecipeRenderer.hash(image);
-            image.writeToFile(png);
-            LOG.info("[dumper] rendered {} ({}, display {}x{}) to {} at {}x{}, pixel hash {}",
-                    id, firstCategory.getId(), first.getDisplayWidth(), first.getDisplayHeight(),
-                    png, image.getWidth(), image.getHeight(), Long.toHexString(hash));
         }
     }
 }

@@ -46,6 +46,7 @@ import net.minecraft.world.level.DataPackConfig;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
+import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 
 import java.lang.reflect.Field;
 import java.nio.file.Files;
@@ -197,8 +198,8 @@ final class DataPlane {
                 remote.add(entry.value());
             }
         });
-        Field field = ClientPacketListener.class.getDeclaredField(Dumper.SRG_CLIENT_PACKET_LISTENER_REGISTRY_ACCESS);
-        field.setAccessible(true);
+        Field field = ObfuscationReflectionHelper.findField(ClientPacketListener.class,
+                Dumper.SRG_CLIENT_PACKET_LISTENER_REGISTRY_ACCESS);
         var access = (LayeredRegistryAccess<ClientRegistryLayer>) field.get(listener);
         field.set(listener, access.replaceFrom(ClientRegistryLayer.REMOTE,
                 new RegistryAccess.ImmutableRegistryAccess(remote).freeze()));

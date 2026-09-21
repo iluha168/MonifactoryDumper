@@ -14,6 +14,7 @@ import java.security.ProtectionDomain;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -44,11 +45,13 @@ public final class ClockAgent implements ClassFileTransformer {
     private static final String OWN_PACKAGE = "com/iluha168/monifactory/faketime/";
 
     // The game runs on SRG member names. Class names are the official ones in 1.20.1. These SRG names have been
-    // stable since 1.17, but they are tied to the Minecraft version like any SRG name.
+    // stable since 1.17, but they are tied to the Minecraft version like any SRG name. The mojmap names are what the
+    // same members are called on the dev road, where the dev-versus-production pixel diff boots with this agent; the
+    // descriptor check keeps either name from matching anything else in the class.
     private static final String UTIL = "net/minecraft/Util";
-    private static final String UTIL_GET_MILLIS = "m_137550_";
+    private static final Set<String> UTIL_GET_MILLIS = Set.of("m_137550_", "getMillis");
     private static final String TEXTURE_MANAGER = "net/minecraft/client/renderer/texture/TextureManager";
-    private static final String TEXTURE_MANAGER_TICK = "m_7673_";
+    private static final Set<String> TEXTURE_MANAGER_TICK = Set.of("m_7673_", "tick");
 
     private static final byte[] CURRENT_TIME_MILLIS = "currentTimeMillis".getBytes(StandardCharsets.UTF_8);
 
@@ -141,8 +144,8 @@ public final class ClockAgent implements ClassFileTransformer {
                                              String[] exceptions) {
                 MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
                 if (visitor == null) return null;
-                boolean getMillis = util && name.equals(UTIL_GET_MILLIS) && descriptor.equals("()J");
-                boolean tick = atlas && name.equals(TEXTURE_MANAGER_TICK) && descriptor.equals("()V");
+                boolean getMillis = util && UTIL_GET_MILLIS.contains(name) && descriptor.equals("()J");
+                boolean tick = atlas && TEXTURE_MANAGER_TICK.contains(name) && descriptor.equals("()V");
                 return new MethodVisitor(Opcodes.ASM9, visitor) {
                     @Override
                     public void visitCode() {
