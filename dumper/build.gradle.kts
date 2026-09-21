@@ -59,6 +59,7 @@ val forgeInstallerScope = configurations.dependencyScope("forgeInstaller")
 val slimeScope = configurations.dependencyScope("slimeLauncher")
 val packScope = configurations.dependencyScope("packScope")
 val headlessGlfwScope = configurations.dependencyScope("headlessGlfw")
+val fakeTimeScope = configurations.dependencyScope("fakeTime")
 
 val mavenizerPath = configurations.resolvable("mavenizerPath") { extendsFrom(mavenizerScope.get()) }
 val forgeInstallerPath = configurations.resolvable("forgeInstallerPath") { extendsFrom(forgeInstallerScope.get()) }
@@ -71,6 +72,13 @@ val headlessGlfwPath = configurations.resolvable("headlessGlfwPath") {
         attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
     }
 }
+val fakeTimePath = configurations.resolvable("fakeTimePath") {
+    extendsFrom(fakeTimeScope.get())
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+    }
+}
 
 dependencies {
     mavenizerScope.name(libs.mavenizer)
@@ -78,6 +86,7 @@ dependencies {
     slimeScope.name(libs.slime.launcher)
     packScope.name(project(path = ":dumper:deps:downloader", configuration = "pack"))
     headlessGlfwScope.name(project(":dumper:deps:headlessglfw"))
+    fakeTimeScope.name(project(":dumper:deps:faketime"))
 }
 
 
@@ -197,13 +206,14 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     val fakeGlfwCompanions = headlessGlfwPath.get().incoming.artifactView {
         componentFilter { it !is ProjectComponentIdentifier }
     }.files
+    val fakeTime = fakeTimePath.get().incoming.files
     val version = versionName
     val heap = maxHeap
 
     // The argfile is these files, these strings and these directories and nothing else. All of them
     // are declared, so a newer Slime Launcher or a different heap rewrites it instead of leaving
     // yesterday's command behind an up-to-date check.
-    inputs.files(filesJson, vanillaJson, vanillaLibList, forgeJson, slimeJars, fakeGlfw, fakeGlfwCompanions)
+    inputs.files(filesJson, vanillaJson, vanillaLibList, forgeJson, slimeJars, fakeGlfw, fakeGlfwCompanions, fakeTime)
     inputs.property("versionName", version)
     inputs.property("heap", heap)
     inputs.property(
@@ -262,6 +272,9 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
                 val artifact = (it["downloads"] as Map<*, *>)["artifact"] as Map<*, *>
                 add(forgeLibraries.resolve(artifact["path"] as String))
             }
+            // On -cp as well as -javaagent, so BootstrapLauncher makes a module of it in MC-BOOTSTRAP. That copy is
+            // the clock: every layer above reads it, so the game's classes and the renderer mod all link to it.
+            addAll(fakeTime)
             addAll(slimeJars)
             addAll(fakeGlfwCompanions)
             addAll(fakeGlfw)
@@ -343,6 +356,8 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
             add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives.absolutePath}")
             add("-Djna.tmpdir=${natives.absolutePath}")
             add("-Dio.netty.native.workdir=${natives.absolutePath}")
+            // The fake clock. The agent itself runs off the app class path; see the -cp entry for where the clock is.
+            add("-javaagent:" + fakeTime.singleFile.absolutePath)
             add("-cp")
             add(classpath.joinToString(File.pathSeparator) { it.absolutePath })
 

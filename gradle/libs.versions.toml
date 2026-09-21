@@ -18,6 +18,9 @@ slime = "0.2.3"
 # Must be the LWJGL the vanilla client ships. The EGL binding is not among the client's libraries,
 # so headlessglfw brings its own, and it is merged into one module with the client's GLFW jar.
 lwjgl = "3.3.1"
+# The ASM Forge puts on the boot module path. The clock agent compiles against it and finds it there at runtime.
+asm = "9.8"
+junit = "5.13.4"
 
 [libraries]
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
@@ -27,6 +30,10 @@ lwjgl = { module = "org.lwjgl:lwjgl", version.ref = "lwjgl" }
 lwjgl-opengl = { module = "org.lwjgl:lwjgl-opengl", version.ref = "lwjgl" }
 lwjgl-glfw = { module = "org.lwjgl:lwjgl-glfw", version.ref = "lwjgl" }
 lwjgl-egl = { module = "org.lwjgl:lwjgl-egl", version.ref = "lwjgl" }
+asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 
 [bundles]
 
