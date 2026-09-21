@@ -15,11 +15,18 @@ mavenizer = "0.5.21"
 # The Mavenizer ships class file version 69, so it needs a JVM far newer than the game's.
 mavenizer-java = "25"
 slime = "0.2.3"
+# Must be the LWJGL the vanilla client ships. The EGL binding is not among the client's libraries,
+# so headlessglfw brings its own, and it is merged into one module with the client's GLFW jar.
+lwjgl = "3.3.1"
 
 [libraries]
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 mavenizer = { module = "net.minecraftforge:minecraft-mavenizer", version.ref = "mavenizer" }
 slime-launcher = { module = "net.minecraftforge:slime-launcher", version.ref = "slime" }
+lwjgl = { module = "org.lwjgl:lwjgl", version.ref = "lwjgl" }
+lwjgl-opengl = { module = "org.lwjgl:lwjgl-opengl", version.ref = "lwjgl" }
+lwjgl-glfw = { module = "org.lwjgl:lwjgl-glfw", version.ref = "lwjgl" }
+lwjgl-egl = { module = "org.lwjgl:lwjgl-egl", version.ref = "lwjgl" }
 
 [bundles]
 

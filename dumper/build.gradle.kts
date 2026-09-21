@@ -58,17 +58,26 @@ val mavenizerScope = configurations.dependencyScope("mavenizer")
 val forgeInstallerScope = configurations.dependencyScope("forgeInstaller")
 val slimeScope = configurations.dependencyScope("slimeLauncher")
 val packScope = configurations.dependencyScope("packScope")
+val headlessGlfwScope = configurations.dependencyScope("headlessGlfw")
 
 val mavenizerPath = configurations.resolvable("mavenizerPath") { extendsFrom(mavenizerScope.get()) }
 val forgeInstallerPath = configurations.resolvable("forgeInstallerPath") { extendsFrom(forgeInstallerScope.get()) }
 val slimePath = configurations.resolvable("slimePath") { extendsFrom(slimeScope.get()) }
 val pack = configurations.resolvable("pack") { extendsFrom(packScope.get()) }
+val headlessGlfwPath = configurations.resolvable("headlessGlfwPath") {
+    extendsFrom(headlessGlfwScope.get())
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+    }
+}
 
 dependencies {
     mavenizerScope.name(libs.mavenizer)
     forgeInstallerScope.name("net.minecraftforge:forge:$mcVersion-$forgeVersion:installer@jar")
     slimeScope.name(libs.slime.launcher)
     packScope.name(project(path = ":dumper:deps:downloader", configuration = "pack"))
+    headlessGlfwScope.name(project(":dumper:deps:headlessglfw"))
 }
 
 
@@ -180,13 +189,21 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     val slimeCache = layout.buildDirectory.dir("slime-cache").get().asFile
     val natives = nativesDir.get().asFile
     val slimeJars = slimePath.get().incoming.files
+    // The fake GLFW goes last on -cp, since the jar a merged module meets last wins each class
+    // they both carry and names the module. Its companions - the EGL binding - go right before it.
+    val fakeGlfw = headlessGlfwPath.get().incoming.artifactView {
+        componentFilter { it is ProjectComponentIdentifier }
+    }.files
+    val fakeGlfwCompanions = headlessGlfwPath.get().incoming.artifactView {
+        componentFilter { it !is ProjectComponentIdentifier }
+    }.files
     val version = versionName
     val heap = maxHeap
 
     // The argfile is these files, these strings and these directories and nothing else. All of them
     // are declared, so a newer Slime Launcher or a different heap rewrites it instead of leaving
     // yesterday's command behind an up-to-date check.
-    inputs.files(filesJson, vanillaJson, vanillaLibList, forgeJson, slimeJars)
+    inputs.files(filesJson, vanillaJson, vanillaLibList, forgeJson, slimeJars, fakeGlfw, fakeGlfwCompanions)
     inputs.property("versionName", version)
     inputs.property("heap", heap)
     inputs.property(
@@ -246,6 +263,8 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
                 add(forgeLibraries.resolve(artifact["path"] as String))
             }
             addAll(slimeJars)
+            addAll(fakeGlfwCompanions)
+            addAll(fakeGlfw)
         }
         val missing = classpath.filterNot { it.isFile }
         if (missing.isNotEmpty()) {
@@ -283,13 +302,34 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
         // entries keep their order.
         val ignoreList = "-DignoreList="
         var hidden = false
+        // A module cannot split a package, so a second jar carrying org.lwjgl.glfw could never sit
+        // beside the real one in the module layer. BootstrapLauncher's -DmergeModules makes one
+        // module of several jars instead, matched by exact file name. The client's own GLFW jar
+        // stays in the group for the classes the fake does not replace (GLFWVidMode, the callback
+        // types), which mods' mixins read as metadata.
+        val mergeModules = "-DmergeModules="
+        val glfwJar = classpath.map { it.name }.singleOrNull { Regex("""lwjgl-glfw-[0-9.]+\.jar""").matches(it) }
+            ?: throw GradleException("the client classpath has no lwjgl-glfw jar for the fake GLFW to merge into")
+        val lwjglVersion = glfwJar.removePrefix("lwjgl-glfw-").removeSuffix(".jar")
+        if (fakeGlfwCompanions.none { it.name == "lwjgl-egl-$lwjglVersion.jar" }) {
+            throw GradleException("the client ships LWJGL $lwjglVersion but headlessglfw brings ${fakeGlfwCompanions.map { it.name }}; bump lwjgl in libs.versions.toml")
+        }
+        val mergeGroup = (listOf(glfwJar) + fakeGlfwCompanions.map { it.name } + fakeGlfw.map { it.name }).joinToString(",")
+        var merged = false
         @Suppress("UNCHECKED_CAST")
         val jvm = ((forge["arguments"] as Map<*, *>)["jvm"] as List<String>).map(expand).map { argument ->
-            if (!argument.startsWith(ignoreList)) argument else {
-                hidden = true
-                argument + slimeJars.joinToString("") { "," + it.name }
+            when {
+                argument.startsWith(ignoreList) -> {
+                    hidden = true
+                    argument + slimeJars.joinToString("") { "," + it.name }
+                }
+                argument.startsWith(mergeModules) -> {
+                    merged = true
+                    "$argument;$mergeGroup"
+                }
+                else -> argument
             }
-        }
+        }.let { if (merged) it else it + (mergeModules + mergeGroup) }
         if (!hidden) {
             throw GradleException("$version.json passes no $ignoreList, so the launcher jars have nowhere to hide")
         }
@@ -334,10 +374,44 @@ val runGame = tasks.register<Exec>("runGame") {
         instance.mkdirs()
         natives.mkdirs()
     }
+    doFirst(HeadlessInstance(instance))
 
     workingDir = instance
     executable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
     argumentProviders.add(ArgFile(launchArgs))
+
+    // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack
+    // that still reaches for one - AWT, tinyfd - fails where it can be seen instead of opening a
+    // window on whoever's desktop the build happens to run.
+    environment.remove("DISPLAY")
+    environment.remove("WAYLAND_DISPLAY")
+}
+
+/**
+ * The two settings a headless client needs that are not launch arguments. Neither file comes with
+ * the pack - the game writes both on its first start - so setting one key in each edits no pack
+ * config, and every other line a player or the game put there stays.
+ *
+ * Without earlyWindowControl=false, FML opens its loading window itself, through a GLFW the fake
+ * does not implement. Without onboardAccessibility:false a fresh instance parks on the
+ * accessibility onboarding screen and never shows the title screen.
+ */
+class HeadlessInstance(private val instance: File) : Action<Task> {
+    override fun execute(task: Task) {
+        set(instance.resolve("config/fml.toml"), "earlyWindowControl", " = ", "false")
+        set(instance.resolve("options.txt"), "onboardAccessibility", ":", "false")
+    }
+
+    private fun set(file: File, key: String, separator: String, value: String) {
+        val line = Regex("""^\s*""" + Regex.escape(key) + """\s*""" + Regex.escape(separator.trim()) + ".*$")
+        val lines = if (file.isFile) file.readLines() else emptyList()
+        val wanted = key + separator + value
+        val updated = if (lines.any(line::matches)) lines.map { if (line.matches(it)) wanted else it } else lines + wanted
+        if (updated != lines) {
+            file.parentFile.mkdirs()
+            file.writeText(updated.joinToString("\n", postfix = "\n"))
+        }
+    }
 }
 
 /** Kept out of the task body so the configuration cache has a class to serialize, not a script. */
