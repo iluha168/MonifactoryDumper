@@ -29,13 +29,16 @@ public final class Dumper {
     static final String OUTPUT_PROPERTY = "monifactory.dumper.output";
     /** What the run makes: see {@link Mode}. Default {@code sample}. */
     static final String MODE_PROPERTY = "monifactory.dumper.mode";
-    /** How many recipes the sample or census draws. Default 1 for a sample and 4,000 for a census. */
+    /**
+     * How many recipes the sample or census draws. Default 1 for a sample and 4,000 for a census. The build renders
+     * the whole corpus unless this is set, and then only its first that many recipes.
+     */
     static final String COUNT_PROPERTY = "monifactory.dumper.count";
     /** The sample's or census's seed. Default 0. */
     static final String SEED_PROPERTY = "monifactory.dumper.seed";
 
     enum Mode {
-        /** The build: {@code recipes.json} for the whole corpus. */
+        /** The build: {@code recipes.json} for the whole corpus and {@code images.pak}, see {@link Batch}. */
         DUMP,
         /** A seeded sample rendered to PNGs with a manifest, see {@link Sample}. */
         SAMPLE,
@@ -71,7 +74,11 @@ public final class Dumper {
             throw new IllegalStateException("-D" + OUTPUT_PROPERTY + " is not set; the renderer has nowhere to write");
         }
         Mode mode = Mode.of(System.getProperty(MODE_PROPERTY, "sample"));
-        int count = Integer.getInteger(COUNT_PROPERTY, mode == Mode.CENSUS ? 4000 : 1);
+        int count = Integer.getInteger(COUNT_PROPERTY, switch (mode) {
+            case DUMP -> Integer.MAX_VALUE;
+            case SAMPLE -> 1;
+            case CENSUS -> 4000;
+        });
         long seed = Long.getLong(SEED_PROPERTY, 0L);
         if (count < 1) {
             throw new IllegalStateException("-D" + COUNT_PROPERTY + " must be at least 1, is " + count);

@@ -7,6 +7,7 @@ include("dumper:deps:headlessglfw")
 include("dumper:deps:faketime")
 include("dumper:deps:downloader")
 include("dumper:deps:imgencoder")
+include("dumper:compare")
 
 include("integrations:discord")
 

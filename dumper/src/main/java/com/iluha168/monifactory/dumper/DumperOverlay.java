@@ -12,7 +12,6 @@ import net.minecraftforge.fml.loading.FMLPaths;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL43;
 
-import java.nio.file.Files;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -104,11 +103,7 @@ final class DumperOverlay extends Overlay {
                 LOG.info("[dumper] EMI loaded in {} ms", System.currentTimeMillis() - emiSince);
                 Corpus corpus = Corpus.of(EmiApi.getRecipeManager());
                 work = switch (job.mode()) {
-                    case DUMP -> () -> {
-                        Files.createDirectories(job.output());
-                        RecipeJson.writeFile(corpus.kept, job.output().resolve("recipes.json"));
-                        return true;
-                    };
+                    case DUMP -> Batch.start(minecraft, corpus, job.output(), job.count())::advance;
                     case SAMPLE -> Sample.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
                     case CENSUS -> Census.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
                 };

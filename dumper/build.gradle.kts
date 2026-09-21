@@ -106,6 +106,50 @@ dependencies {
     // it: EMI's own member names are not Minecraft's, and the rename to SRG never touches them. It is taken from the
     // downloaded pack rather than the instance, because the instance is where this mod gets installed.
     compileOnly(pack.get().incoming.files.asFileTree.matching { include("mods/emi-*.jar") })
+    // The encoder is packed in, see jarJar below.
+    compileOnly(project(":dumper:deps:imgencoder"))
+}
+
+// Libraries the renderer carries inside its own jar, in Forge's jar-in-jar layout. Forge loads each nested jar that has
+// no mods.toml as a GAMELIBRARY, a module in the GAME layer next to the mods. Neither -cp nor a jar dropped loose in
+// mods/ would do: webp-imageio is written in Kotlin, and the pack's Kotlin for Forge is a LIBRARY in the PLUGIN layer
+// that already carries every kotlin.* package. A GAME-layer module reads that one; a second kotlin-stdlib anywhere in
+// the layer stack would be a split package. So kotlin-stdlib stays out, and the fork runs on KFF's Kotlin, which is
+// newer than any stdlib call it makes.
+val jarJarScope = configurations.dependencyScope("jarJar")
+val jarJarPath = configurations.resolvable("jarJarPath") {
+    extendsFrom(jarJarScope.get())
+    exclude(group = "org.jetbrains.kotlin")
+    exclude(group = "org.jetbrains", module = "annotations")
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+    }
+}
+dependencies {
+    jarJarScope.name(project(":dumper:deps:imgencoder"))
+}
+
+val jarJarMetadata = tasks.register<JarJarMetadata>("jarJarMetadata") {
+    description = "Lists the nested jars for Forge's jar-in-jar locator."
+    val ownGroup = project.group.toString()
+    jars = jarJarPath.flatMap { path ->
+        path.incoming.artifacts.resolvedArtifacts.map { artifacts ->
+            artifacts.map { artifact ->
+                when (val id = artifact.id.componentIdentifier) {
+                    is ModuleComponentIdentifier -> listOf(id.group, id.module, id.version, artifact.file.name)
+                    // This build's own jars carry no version. Nothing else ships them, so any version selects them.
+                    else -> listOf(ownGroup, artifact.file.name.removeSuffix(".jar"), "0", artifact.file.name)
+                }.joinToString(":")
+            }
+        }
+    }
+    output = layout.buildDirectory.file("jarjar/metadata.json")
+}
+
+tasks.jar {
+    from(jarJarPath) { into("META-INF/jarjar") }
+    from(jarJarMetadata) { into("META-INF/jarjar") }
 }
 
 
@@ -495,7 +539,7 @@ val artifactDir = layout.buildDirectory.dir("dumps/version-TODO")
 
 val dump = tasks.register<Exec>("dump") {
     group = "modpack"
-    description = "Boots the pack and writes the artifact directory: recipes.json for now, images to come."
+    description = "Boots the pack and writes the artifact directory: recipes.json and images.pak (static recipes so far)."
 
     bootRenderer("dump", artifactDir)
     // The artifact is a function of the renderer, the pack and the launch; the instance directory itself is not an
@@ -505,8 +549,9 @@ val dump = tasks.register<Exec>("dump") {
     inputs.files(writeLaunchArgs).withPropertyName("launch")
     outputs.dir(artifactDir)
     // One boot in eight has been seen to hang in mod construction, before the renderer exists to notice. A boot is
-    // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets.
-    timeout = Duration.ofMinutes(30)
+    // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets. The static batch
+    // then takes about three quarters of an hour, most of it waiting on the WebP encoder.
+    timeout = Duration.ofMinutes(120)
 }
 
 val dumpArtifact = configurations.consumable("dumpArtifact")
@@ -514,5 +559,32 @@ val dumpArtifact = configurations.consumable("dumpArtifact")
 artifacts {
     add(dumpArtifact.name, artifactDir) {
         builtBy(dump)
+    }
+}
+
+/**
+ * META-INF/jarjar/metadata.json: each nested jar's coordinates, the version it is, and the range the renderer accepts,
+ * which is that version or newer. Forge picks one copy per coordinate across every mod that nests it.
+ */
+abstract class JarJarMetadata : DefaultTask() {
+    /** group:artifact:version:file per nested jar. */
+    @get:Input
+    abstract val jars: ListProperty<String>
+
+    @get:OutputFile
+    abstract val output: RegularFileProperty
+
+    @TaskAction
+    fun write() {
+        val entries = jars.get().sorted().map {
+            val (group, artifact, version, file) = it.split(":")
+            mapOf(
+                "identifier" to mapOf("group" to group, "artifact" to artifact),
+                "version" to mapOf("range" to "[$version,)", "artifactVersion" to version),
+                "path" to "META-INF/jarjar/$file",
+                "isObfuscated" to false,
+            )
+        }
+        output.get().asFile.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(mapOf("jars" to entries))) + "\n")
     }
 }

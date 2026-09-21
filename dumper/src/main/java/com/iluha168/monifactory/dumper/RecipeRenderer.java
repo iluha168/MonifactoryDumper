@@ -15,6 +15,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import org.joml.Matrix4f;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * Draws one EMI recipe the way EMI's own recipe screenshot does, into an offscreen target, and reads it back.
  * Runs on the game thread, inside a frame.
@@ -38,49 +41,72 @@ final class RecipeRenderer {
                 ? (int) minecraft.getWindow().getGuiScale()
                 : EmiConfig.recipeScreenshotScale;
 
-        RenderTarget target = new TextureTarget(width * scale, height * scale, true, Minecraft.ON_OSX);
+        RenderTarget target = TARGETS.get(width * scale, height * scale);
+        target.setClearColor(0f, 0f, 0f, 0f);
+        // Clear before bindWrite, never after: clear() ends by unbinding, which would leave the draw going to
+        // the main framebuffer and the target blank.
+        target.clear(Minecraft.ON_OSX);
+        target.bindWrite(true);
+
+        PoseStack view = RenderSystem.getModelViewStack();
+        Matrix4f projection = RenderSystem.getProjectionMatrix();
+        view.pushPose();
+        FakeTime.freeze(millis);
+        // One recipe that throws must not leave the model-view stack, the projection or the clock behind for
+        // every recipe after it.
         try {
-            target.setClearColor(0f, 0f, 0f, 0f);
-            // Clear before bindWrite, never after: clear() ends by unbinding, which would leave the draw going to
-            // the main framebuffer and the target blank.
-            target.clear(Minecraft.ON_OSX);
-            target.bindWrite(true);
+            view.setIdentity();
+            view.translate(-1.0, 1.0, 0.0);
+            view.scale(2f / width, -2f / height, -1f / 1000f);
+            view.translate(0.0, 0.0, 10.0);
+            RenderSystem.applyModelViewMatrix();
+            RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorting.ORTHOGRAPHIC_Z);
 
-            PoseStack view = RenderSystem.getModelViewStack();
-            Matrix4f projection = RenderSystem.getProjectionMatrix();
-            view.pushPose();
-            FakeTime.freeze(millis);
-            // One recipe that throws must not leave the model-view stack, the projection or the clock behind for
-            // every recipe after it.
-            try {
-                view.setIdentity();
-                view.translate(-1.0, 1.0, 0.0);
-                view.scale(2f / width, -2f / height, -1f / 1000f);
-                view.translate(0.0, 0.0, 10.0);
-                RenderSystem.applyModelViewMatrix();
-                RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorting.ORTHOGRAPHIC_Z);
-
-                GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
-                EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
-                graphics.flush();
-            } finally {
-                FakeTime.release();
-                RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);
-                view.popPose();
-                RenderSystem.applyModelViewMatrix();
-                target.unbindWrite();
-                minecraft.getMainRenderTarget().bindWrite(true);
-            }
-
-            NativeImage image = new NativeImage(target.width, target.height, false);
-            RenderSystem.bindTexture(target.getColorTextureId());
-            image.downloadTexture(0, true);
-            image.flipY();
-            return image;
+            GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
+            EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
+            graphics.flush();
         } finally {
-            target.destroyBuffers();
+            FakeTime.release();
+            RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);
+            view.popPose();
+            RenderSystem.applyModelViewMatrix();
+            target.unbindWrite();
+            minecraft.getMainRenderTarget().bindWrite(true);
+        }
+
+        NativeImage image = new NativeImage(target.width, target.height, false);
+        RenderSystem.bindTexture(target.getColorTextureId());
+        image.downloadTexture(0, true);
+        image.flipY();
+        return image;
+    }
+
+    /**
+     * Offscreen targets by pixel size, the least recently used dropped past {@link #CAPACITY}. A recipe is drawn several
+     * times over and most categories hold one or two display sizes, so a handful of targets serve the whole corpus
+     * instead of one being made and destroyed per draw. Game thread only.
+     */
+    private static final class Targets extends LinkedHashMap<Long, RenderTarget> {
+        static final int CAPACITY = 32;
+
+        Targets() {
+            super(64, 0.75f, true);
+        }
+
+        RenderTarget get(int width, int height) {
+            return computeIfAbsent(((long) width << 32) | height,
+                    size -> new TextureTarget(width, height, true, Minecraft.ON_OSX));
+        }
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<Long, RenderTarget> eldest) {
+            if (size() <= CAPACITY) return false;
+            eldest.getValue().destroyBuffers();
+            return true;
         }
     }
+
+    private static final Targets TARGETS = new Targets();
 
     /**
      * FNV-1a over the image's pixels. Equal hashes mean equal frames, which is all animation detection asks.
@@ -90,8 +116,13 @@ final class RecipeRenderer {
      * deterministic, at 2.7x the frame rate.
      */
     static long hash(NativeImage image) {
+        return hash(image.getPixelsRGBA());
+    }
+
+    /** {@link #hash(NativeImage)} over pixels already read out with {@link NativeImage#getPixelsRGBA()}. */
+    static long hash(int[] pixels) {
         long hash = 0xcbf29ce484222325L;
-        for (int pixel : image.getPixelsRGBA()) {
+        for (int pixel : pixels) {
             for (int shift = 0; shift < 32; shift += 8) {
                 hash ^= (pixel >>> shift) & 0xff;
                 hash *= 0x100000001b3L;
