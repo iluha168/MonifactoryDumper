@@ -39,10 +39,17 @@ repositories {
     minecraft.mavenizer(this)
     // The Mavenizer puts itself first and publishes net.minecraftforge:forge under the same
     // coordinates the installer lives at, so a lookup for the installer classifier stops there and
-    // fails. Forge's own maven has to be asked first for the artifact to be found at all.
-    val forgeMaven = maven(fg.forgeMaven)
-    remove(forgeMaven)
-    addFirst(forgeMaven)
+    // fails. Forge's own maven has to be asked first for that one artifact to be found at all - and
+    // for nothing else, since Forge's maven has a forge pom without the classes, and the compile
+    // classpath would end up with no Minecraft on it.
+    val forgeInstallerMaven = maven {
+        fg.forgeMaven.execute(this)
+        name = "ForgeInstaller"
+        content { onlyForConfigurations("forgeInstallerPath") }
+    }
+    remove(forgeInstallerMaven)
+    addFirst(forgeInstallerMaven)
+    maven(fg.forgeMaven)
     maven(fg.minecraftLibsMaven)
     mavenCentral()
 }
@@ -87,6 +94,16 @@ dependencies {
     packScope.name(project(path = ":dumper:deps:downloader", configuration = "pack"))
     headlessGlfwScope.name(project(":dumper:deps:headlessglfw"))
     fakeTimeScope.name(project(":dumper:deps:faketime"))
+}
+
+dependencies {
+    // Not packed in: the clock has to be the one copy the agent links every call site to, and at runtime that copy is
+    // a module of its own in MC-BOOTSTRAP. See writeLaunchArgs.
+    compileOnly(project(":dumper:deps:faketime"))
+    // The renderer draws through EMI, so it compiles against the jar the pack ships, as it ships. Nothing deobfuscates
+    // it: EMI's own member names are not Minecraft's, and the rename to SRG never touches them. It is taken from the
+    // downloaded pack rather than the instance, because the instance is where this mod gets installed.
+    compileOnly(pack.get().incoming.files.asFileTree.matching { include("mods/emi-*.jar") })
 }
 
 
@@ -147,9 +164,14 @@ val instanceDir = layout.buildDirectory.dir("instance")
 
 val installPack = tasks.register<Sync>("installPack") {
     group = "modpack"
-    description = "Lays the downloaded pack into the instance directory."
+    description = "Lays the downloaded pack and the renderer mod into the instance directory."
 
     from(pack.get().incoming.files)
+    // The renderer is a mod like any other in there, in the names the production game runs with.
+    from(tasks.named("renameJar")) {
+        include("*.jar")
+        into("mods")
+    }
     into(instanceDir)
 
     // Sync so a mod dropped from the pack does not linger and break the next boot. Everything else
@@ -377,9 +399,12 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     }
 }
 
+/** Where the renderer mod writes. */
+val renderDir = layout.buildDirectory.dir("render")
+
 val runGame = tasks.register<Exec>("runGame") {
     group = "modpack"
-    description = "Boots the real Monifactory install. Assets download on the first run."
+    description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
 
     dependsOn(writeLaunchArgs, installPack)
 
@@ -393,6 +418,8 @@ val runGame = tasks.register<Exec>("runGame") {
 
     workingDir = instance
     executable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
+    // Before the argfile, since everything after its main class is an argument to the game.
+    args("-Dmonifactory.dumper.output=" + renderDir.get().asFile.absolutePath)
     argumentProviders.add(ArgFile(launchArgs))
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack

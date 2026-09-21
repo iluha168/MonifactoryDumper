@@ -1,0 +1,31 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "MIT"
+
+[[mods]]
+modId = "monifactorydumper"
+version = "0.0.0"
+displayName = "Monifactory Dumper"
+description = "Renders EMI recipes headless and exits. Not for players."
+
+[[dependencies.monifactorydumper]]
+modId = "forge"
+mandatory = true
+versionRange = "[47,)"
+ordering = "NONE"
+side = "CLIENT"
+
+[[dependencies.monifactorydumper]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20.1]"
+ordering = "NONE"
+side = "CLIENT"
+
+# The renderer is compiled against EMI's classes and draws through it.
+[[dependencies.monifactorydumper]]
+modId = "emi"
+mandatory = true
+versionRange = "*"
+ordering = "NONE"
+side = "CLIENT"
