@@ -21,6 +21,9 @@ lwjgl = "3.3.1"
 # The ASM Forge puts on the boot module path. The clock agent compiles against it and finds it there at runtime.
 asm = "9.8"
 junit = "5.13.4"
+# Lossless WebP stills from libwebp over JNI; its jar carries the .so, so nothing is built or downloaded by hand.
+# Pinned exactly: the libwebp build is part of the output bytes (0.10.0 and 0.11.0 differ by up to 32 B on one image).
+webp-imageio = "0.11.0"
 
 [libraries]
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
@@ -34,6 +37,7 @@ asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+webp-imageio = { module = "com.github.usefulness:webp-imageio", version.ref = "webp-imageio" }
 
 [bundles]
 
