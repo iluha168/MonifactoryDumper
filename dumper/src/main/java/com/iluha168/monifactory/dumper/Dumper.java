@@ -27,10 +27,34 @@ public final class Dumper {
 
     /** Where the render goes. The build passes it. */
     static final String OUTPUT_PROPERTY = "monifactory.dumper.output";
-    /** Which recipes to render: a sample of this many, see {@link Sample}. Default 1. */
+    /** What the run makes: see {@link Mode}. Default {@code sample}. */
+    static final String MODE_PROPERTY = "monifactory.dumper.mode";
+    /** How many recipes the sample or census draws. Default 1 for a sample and 4,000 for a census. */
     static final String COUNT_PROPERTY = "monifactory.dumper.count";
-    /** The sample's seed. Default 0. */
+    /** The sample's or census's seed. Default 0. */
     static final String SEED_PROPERTY = "monifactory.dumper.seed";
+
+    enum Mode {
+        /** The build: {@code recipes.json} for the whole corpus. */
+        DUMP,
+        /** A seeded sample rendered to PNGs with a manifest, see {@link Sample}. */
+        SAMPLE,
+        /** The animation census over a sample, see {@link Census}. */
+        CENSUS;
+
+        static Mode of(String name) {
+            try {
+                return valueOf(name.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalStateException("-D" + MODE_PROPERTY + "=" + name + " is none of "
+                        + java.util.Arrays.toString(values()), e);
+            }
+        }
+    }
+
+    /** What one run was asked for. */
+    record Job(Mode mode, Path output, long seed, int count) {
+    }
 
     /**
      * SRG names, the runtime names of Minecraft members this mod reaches by reflection. Each one is tied to this
@@ -46,7 +70,8 @@ public final class Dumper {
         if (output == null || output.isBlank()) {
             throw new IllegalStateException("-D" + OUTPUT_PROPERTY + " is not set; the renderer has nowhere to write");
         }
-        int count = Integer.getInteger(COUNT_PROPERTY, 1);
+        Mode mode = Mode.of(System.getProperty(MODE_PROPERTY, "sample"));
+        int count = Integer.getInteger(COUNT_PROPERTY, mode == Mode.CENSUS ? 4000 : 1);
         long seed = Long.getLong(SEED_PROPERTY, 0L);
         if (count < 1) {
             throw new IllegalStateException("-D" + COUNT_PROPERTY + " must be at least 1, is " + count);
@@ -56,10 +81,11 @@ public final class Dumper {
         FakeTime.holdAtlas(true);
         Minecraft minecraft = Minecraft.getInstance();
         // tell() always queues, even when called on the game thread, so this cannot run inside the constructor.
-        minecraft.tell(() -> takeOver(minecraft, Path.of(output), seed, count));
+        Job job = new Job(mode, Path.of(output), seed, count);
+        minecraft.tell(() -> takeOver(minecraft, job));
     }
 
-    private static void takeOver(Minecraft minecraft, Path output, long seed, int count) {
+    private static void takeOver(Minecraft minecraft, Job job) {
         if (!(minecraft.getOverlay() instanceof LoadingOverlay vanilla)) {
             fail(new IllegalStateException("expected the boot's LoadingOverlay, found " + minecraft.getOverlay()));
             return;
@@ -72,8 +98,9 @@ public final class Dumper {
             fail(e);
             return;
         }
-        LOG.info("[dumper] replacing the vanilla loading overlay; frames pass through until the boot reload is done");
-        minecraft.setOverlay(new DumperOverlay(minecraft, reload, output, seed, count));
+        LOG.info("[dumper] replacing the vanilla loading overlay for {}; frames pass through until the boot reload is"
+                + " done", job);
+        minecraft.setOverlay(new DumperOverlay(minecraft, reload, job));
     }
 
     /**

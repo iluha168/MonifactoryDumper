@@ -1,5 +1,7 @@
 @file:Suppress("UnstableApiUsage")
 
+import java.time.Duration
+
 plugins {
     `java-library`
     alias(libs.plugins.forgegradle)
@@ -399,38 +401,33 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     }
 }
 
-/** Where the renderer mod writes. */
+/** Where runGame has the renderer mod write. */
 val renderDir = layout.buildDirectory.dir("render")
 
-/** How many recipes runGame renders, and the seed that picks them. The mod defaults to 1 and 0. */
-val sampleCount = providers.gradleProperty("monifactory.sample.count")
-val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
-
-val runGame = tasks.register<Exec>("runGame") {
-    group = "modpack"
-    description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
-
+/**
+ * Boots the real Monifactory install with the renderer mod in [mode], writing into [output], which is emptied first.
+ * The game exits on its own once the renderer is done. Anything added to args after this goes after the argfile's main
+ * class, so it reaches the game rather than the JVM.
+ */
+fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properties: Pair<String, String>) {
     dependsOn(writeLaunchArgs, installPack)
 
     val instance = instanceDir.get().asFile
     val natives = nativesDir.get().asFile
-    val render = renderDir.get().asFile
+    val out = output.get().asFile
     doFirst {
         instance.mkdirs()
         natives.mkdirs()
-        // Every run writes a whole set; a PNG left over from the last one would pass for part of this one.
-        render.deleteRecursively()
+        // Every run writes a whole set; a file left over from the last one would pass for part of this one.
+        out.deleteRecursively()
     }
     doFirst(HeadlessInstance(instance))
 
     workingDir = instance
     executable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
     // Before the argfile, since everything after its main class is an argument to the game.
-    args("-Dmonifactory.dumper.output=" + renderDir.get().asFile.absolutePath)
-    // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 for the M1
-    // dev-versus-production diff. The same seed picks the same recipes in any boot.
-    sampleCount.orNull?.let { args("-Dmonifactory.dumper.count=$it") }
-    sampleSeed.orNull?.let { args("-Dmonifactory.dumper.seed=$it") }
+    args("-Dmonifactory.dumper.mode=$mode", "-Dmonifactory.dumper.output=" + out.absolutePath)
+    properties.forEach { (key, value) -> args("-Dmonifactory.dumper.$key=$value") }
     argumentProviders.add(ArgFile(launchArgs))
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack
@@ -438,6 +435,26 @@ val runGame = tasks.register<Exec>("runGame") {
     // window on whoever's desktop the build happens to run.
     environment.remove("DISPLAY")
     environment.remove("WAYLAND_DISPLAY")
+}
+
+/** What runGame makes: sample (the default), census or dump. See Dumper.Mode. */
+val runMode = providers.gradleProperty("monifactory.mode").getOrElse("sample")
+/** How many recipes runGame draws, and the seed that picks them. The mod defaults to 1 (4,000 for a census) and 0. */
+val sampleCount = providers.gradleProperty("monifactory.sample.count")
+val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
+
+val runGame = tasks.register<Exec>("runGame") {
+    group = "modpack"
+    description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
+
+    // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 for the M1
+    // dev-versus-production diff, or -Pmonifactory.mode=census for the animation census. The same seed picks the same
+    // recipes in any boot.
+    bootRenderer(
+        runMode,
+        renderDir,
+        *listOfNotNull(sampleCount.orNull?.let { "count" to it }, sampleSeed.orNull?.let { "seed" to it }).toTypedArray(),
+    )
 }
 
 /**
@@ -476,17 +493,20 @@ class ArgFile(private val file: Provider<RegularFile>) : CommandLineArgumentProv
 // TODO Version the artifact by the pack version the dump came from.
 val artifactDir = layout.buildDirectory.dir("dumps/version-TODO")
 
-val dump = tasks.register("dump") {
+val dump = tasks.register<Exec>("dump") {
     group = "modpack"
-    description = "Renders the recipe corpus into a versioned artifact directory. Stub."
+    description = "Boots the pack and writes the artifact directory: recipes.json for now, images to come."
 
-    val outputDir = artifactDir // Weird thing crashes build if inlined
-    outputs.dir(outputDir)
-
-    doLast {
-        // TODO File will be produced by the real dumper.
-        outputDir.get().file("recipes.json").asFile.writeText("""["T","O","D","O"]""")
-    }
+    bootRenderer("dump", artifactDir)
+    // The artifact is a function of the renderer, the pack and the launch; the instance directory itself is not an
+    // input, since the game writes logs and options into it on every boot.
+    inputs.files(tasks.named("renameJar")).withPropertyName("renderer")
+    inputs.files(pack.get().incoming.files).withPropertyName("pack")
+    inputs.files(writeLaunchArgs).withPropertyName("launch")
+    outputs.dir(artifactDir)
+    // One boot in eight has been seen to hang in mod construction, before the renderer exists to notice. A boot is
+    // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets.
+    timeout = Duration.ofMinutes(30)
 }
 
 val dumpArtifact = configurations.consumable("dumpArtifact")

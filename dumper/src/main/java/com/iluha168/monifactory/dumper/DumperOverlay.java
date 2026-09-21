@@ -12,7 +12,7 @@ import net.minecraftforge.fml.loading.FMLPaths;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL43;
 
-import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -33,21 +33,22 @@ final class DumperOverlay extends Overlay {
 
     private final Minecraft minecraft;
     private final ReloadInstance bootReload;
-    private final Path output;
-    private final long seed;
-    private final int count;
+    private final Dumper.Job job;
 
     private Step step = Step.BOOT;
     private CompletableFuture<DataPlane.Server> serverReload;
     private long emiSince;
-    private Sample sample;
+    /** The render step's work, one frame's budget per call; true once it is done. */
+    private Work work;
 
-    DumperOverlay(Minecraft minecraft, ReloadInstance bootReload, Path output, long seed, int count) {
+    interface Work {
+        boolean advance() throws Exception;
+    }
+
+    DumperOverlay(Minecraft minecraft, ReloadInstance bootReload, Dumper.Job job) {
         this.minecraft = minecraft;
         this.bootReload = bootReload;
-        this.output = output;
-        this.seed = seed;
-        this.count = count;
+        this.job = job;
     }
 
     @Override
@@ -101,11 +102,20 @@ final class DumperOverlay extends Overlay {
                     return Step.EMI;
                 }
                 LOG.info("[dumper] EMI loaded in {} ms", System.currentTimeMillis() - emiSince);
-                sample = Sample.choose(minecraft, EmiApi.getRecipeManager(), output, seed, count);
+                Corpus corpus = Corpus.of(EmiApi.getRecipeManager());
+                work = switch (job.mode()) {
+                    case DUMP -> () -> {
+                        Files.createDirectories(job.output());
+                        RecipeJson.writeFile(corpus.kept, job.output().resolve("recipes.json"));
+                        return true;
+                    };
+                    case SAMPLE -> Sample.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                    case CENSUS -> Census.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                };
                 return Step.RENDER;
             }
             case RENDER -> {
-                return sample.advance() ? Step.EXIT : Step.RENDER;
+                return work.advance() ? Step.EXIT : Step.RENDER;
             }
             case EXIT -> {
                 // Ends the game loop after this frame. Main.main then runs Minecraft.destroy(), which exits with 0.

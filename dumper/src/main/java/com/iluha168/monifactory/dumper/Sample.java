@@ -2,8 +2,6 @@ package com.iluha168.monifactory.dumper;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import dev.emi.emi.api.recipe.EmiRecipe;
-import dev.emi.emi.api.recipe.EmiRecipeCategory;
-import dev.emi.emi.api.recipe.EmiRecipeManager;
 import net.minecraft.client.Minecraft;
 
 import java.io.BufferedWriter;
@@ -16,7 +14,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,8 +34,8 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * frame later time to land. The manifest records whether the last two passes agreed.
  * <p>
  * Output: {@code <id>.png} per recipe, {@code manifest.tsv}, {@code categories.tsv}, which lists every category EMI
- * aggregates with its recipe count, including the empty ones, and {@code recipes.tsv}, every distinct recipe's id (blank
- * if it has none), category and class.
+ * aggregates with its recipe count, including the empty ones, and {@code recipes.tsv}, every kept recipe's id (blank if
+ * it has none), category and class.
  */
 final class Sample {
     /** Two warm-up passes, then the one that is written. */
@@ -71,46 +68,31 @@ final class Sample {
         this.failures = new String[picks.size()];
     }
 
-    /** Picks the sample from what EMI aggregated, and writes {@code categories.tsv} and {@code recipes.tsv}. */
-    static Sample choose(Minecraft minecraft, EmiRecipeManager recipes, Path output, long seed, int count)
-            throws IOException {
+    /** Picks the sample from the corpus, and writes {@code categories.tsv} and {@code recipes.tsv}. */
+    static Sample choose(Minecraft minecraft, Corpus corpus, Path output, long seed, int count) throws IOException {
         Files.createDirectories(output);
-        // TooManyRecipeViewers lists some categories twice with the same recipe objects in both, so recipes are told
-        // apart by identity, and a recipe belongs to the first category that lists it.
-        Map<EmiRecipe, EmiRecipeCategory> distinct = new IdentityHashMap<>();
-        int listed = 0;
-        try (BufferedWriter categories = Files.newBufferedWriter(output.resolve("categories.tsv"), StandardCharsets.UTF_8)) {
-            categories.write("category\trecipes\n");
-            for (EmiRecipeCategory category : recipes.getCategories()) {
-                List<EmiRecipe> list = recipes.getRecipes(category);
-                categories.write(category.getId() + "\t" + list.size() + "\n");
-                for (EmiRecipe recipe : list) {
-                    listed++;
-                    distinct.putIfAbsent(recipe, category);
-                }
-            }
-        }
+        corpus.writeCategories(output.resolve("categories.tsv"));
 
         // An id shared by two recipes cannot name one of them across boots, so neither is eligible.
-        Map<String, EmiRecipe> byId = new HashMap<>();
+        Map<String, Corpus.Entry> byId = new HashMap<>();
         Set<String> shared = new HashSet<>();
         int unnamed = 0;
-        for (EmiRecipe recipe : distinct.keySet()) {
-            if (recipe.getId() == null) {
+        for (Corpus.Entry entry : corpus.kept) {
+            if (entry.recipe().getId() == null) {
                 unnamed++;
                 continue;
             }
-            String id = recipe.getId().toString();
-            if (byId.putIfAbsent(id, recipe) != null) shared.add(id);
+            String id = entry.recipe().getId().toString();
+            if (byId.putIfAbsent(id, entry) != null) shared.add(id);
         }
         shared.forEach(byId::remove);
 
-        // Every distinct recipe, so two boots can be compared as sets and not only through the sample.
+        // Every kept recipe, so two boots can be compared as sets and not only through the sample.
         try (BufferedWriter all = Files.newBufferedWriter(output.resolve("recipes.tsv"), StandardCharsets.UTF_8)) {
             all.write("id\tcategory\tclass\n");
-            for (Map.Entry<EmiRecipe, EmiRecipeCategory> entry : distinct.entrySet()) {
-                EmiRecipe recipe = entry.getKey();
-                all.write((recipe.getId() == null ? "" : recipe.getId().toString()) + "\t" + entry.getValue().getId()
+            for (Corpus.Entry entry : corpus.kept) {
+                EmiRecipe recipe = entry.recipe();
+                all.write((recipe.getId() == null ? "" : recipe.getId().toString()) + "\t" + entry.category()
                         + "\t" + recipe.getClass().getName() + "\n");
             }
         }
@@ -124,18 +106,16 @@ final class Sample {
         Set<String> files = new HashSet<>();
         List<Pick> picks = new ArrayList<>(chosen.size());
         for (String id : chosen) {
-            EmiRecipe recipe = byId.get(id);
+            Corpus.Entry entry = byId.get(id);
             String base = id.replaceAll("[^A-Za-z0-9._-]", "_");
             String file = base + ".png";
             for (int n = 2; !files.add(file); n++) file = base + "~" + n + ".png";
-            picks.add(new Pick(recipe, id, distinct.get(recipe).getId().toString(), file));
+            picks.add(new Pick(entry.recipe(), id, entry.category(), file));
         }
-        LOG.info("[dumper] EMI lists {} categories, {} recipes, {} distinct; {} without an id, {} ids shared; "
-                        + "sampled {} of {} with seed {}",
-                recipes.getCategories().size(), listed, distinct.size(), unnamed, shared.size(),
-                picks.size(), ids.size(), seed);
+        LOG.info("[dumper] {} kept recipes, {} without an id, {} ids shared; sampled {} of {} with seed {}",
+                corpus.kept.size(), unnamed, shared.size(), picks.size(), ids.size(), seed);
         if (picks.isEmpty()) {
-            throw new IllegalStateException("EMI has no recipe to sample");
+            throw new IllegalStateException("the corpus has no recipe to sample");
         }
         return new Sample(minecraft, output, picks);
     }
