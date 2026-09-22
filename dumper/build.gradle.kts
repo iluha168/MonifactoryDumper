@@ -284,14 +284,13 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     }.files
     val fakeTime = fakeTimePath.get().incoming.files
     val version = versionName
-    val heap = maxHeap
 
     // The argfile is these files, these strings and these directories and nothing else. All of them
-    // are declared, so a newer Slime Launcher or a different heap rewrites it instead of leaving
-    // yesterday's command behind an up-to-date check.
+    // are declared, so a newer Slime Launcher rewrites it instead of leaving yesterday's command
+    // behind an up-to-date check. The heap is not in it: it changes nothing a dump contains, and
+    // every dump takes the argfile as an input, so a different -Pmonifactory.heap would redo them.
     inputs.files(filesJson, vanillaJson, vanillaLibList, forgeJson, slimeJars, fakeGlfw, fakeGlfwCompanions, fakeTime)
     inputs.property("versionName", version)
-    inputs.property("heap", heap)
     inputs.property(
         "directories",
         listOf(vanillaRoot, forgeLibraries, instance, assetsDir, slimeCache, natives).map { it.absolutePath },
@@ -425,8 +424,6 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
 
         val command = buildList {
             addAll(jvm)
-            // Monifactory does not finish loading in a default heap.
-            add("-Xmx$heap")
             // java.library.path stays unset on purpose - it is what wakes Slime Launcher's own
             // native extraction, and LWJGL 3 unpacks itself.
             add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives.absolutePath}")
@@ -483,6 +480,8 @@ fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properti
     args("-Dmonifactory.dumper.mode=$mode")
     properties.forEach { (key, value) -> args("-Dmonifactory.dumper.$key=$value") }
     argumentProviders.add(SystemProperty("monifactory.dumper.output", out))
+    // Monifactory does not finish loading in a default heap. Here rather than in the argfile, see writeLaunchArgs.
+    argumentProviders.add(Heap(maxHeap))
     argumentProviders.add(ArgFile(launchArgs))
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack
@@ -556,6 +555,15 @@ class HeadlessInstance(private val instance: File) : Action<Task> {
 /** A -D argument whose value is only known when the task runs. */
 class SystemProperty(private val key: String, private val value: Provider<File>) : CommandLineArgumentProvider {
     override fun asArguments() = listOf("-D$key=" + value.get().absolutePath)
+}
+
+/**
+ * The game's -Xmx. A provider, not a plain argument: Exec's args are inputs, and a heap changes nothing a dump
+ * contains, so asking for a different one must not redo a finished dump. A provider is an input only through its
+ * annotated properties, and this one has none.
+ */
+class Heap(private val size: String) : CommandLineArgumentProvider {
+    override fun asArguments() = listOf("-Xmx$size")
 }
 
 /** Kept out of the task body so the configuration cache has a class to serialize, not a script. */
@@ -646,6 +654,7 @@ val dump = tasks.register<Exec>("dump") {
  * or moves `latest`, which other projects read images through.
  */
 val dataArtifactDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir("$name-data") }
+val latestDataDump = dumpsDir.get().dir("latest-data")
 
 val dumpData = tasks.register<Exec>("dumpData") {
     group = "modpack"
@@ -657,6 +666,14 @@ val dumpData = tasks.register<Exec>("dumpData") {
     requireArtifact(dataArtifactDir, images = false)
     // After the full build, never beside it: two games at once would share the instance directory.
     mustRunAfter(dump)
+
+    // build/dumps/latest-data, what dumpDataArtifact hands to other projects, for the same reason dump keeps latest.
+    val latest = latestDataDump.asFile.toPath()
+    val target = dataArtifactDir.map { it.asFile.name }
+    doLast {
+        Files.deleteIfExists(latest)
+        Files.createSymbolicLink(latest, Path.of(target.get()))
+    }
 }
 
 // The checks are the :dumper:compare tools, run on their own classpath. It carries webp-imageio's decoder half and its
@@ -757,10 +774,14 @@ tasks.register<JavaExec>("rebuildCheck") {
 }
 
 val dumpArtifact = configurations.consumable("dumpArtifact")
+val dumpDataArtifact = configurations.consumable("dumpDataArtifact")
 
 artifacts {
     add(dumpArtifact.name, latestDump) {
         builtBy(dump)
+    }
+    add(dumpDataArtifact.name, latestDataDump) {
+        builtBy(dumpData)
     }
 }
 
