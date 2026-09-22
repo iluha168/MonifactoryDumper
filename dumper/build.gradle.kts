@@ -492,7 +492,7 @@ fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properti
     environment.remove("WAYLAND_DISPLAY")
 }
 
-/** What runGame makes: sample (the default), census, seq or dump. See Dumper.Mode. */
+/** What runGame makes: sample (the default), census, seq, dump or data. See Dumper.Mode. */
 val runMode = providers.gradleProperty("monifactory.mode").getOrElse("sample")
 /** How many recipes runGame draws, and the seed that picks them. The mod defaults to 1 (4,000 for a census) and 0. */
 val sampleCount = providers.gradleProperty("monifactory.sample.count")
@@ -606,11 +606,12 @@ fun Exec.dumpInputs() {
  * out, Minecraft's own out-of-memory handling stops the game and the JVM still exits 0 (seen with a 3G heap during
  * EMI's reload), and without this the build would report success with no artifact at all.
  */
-fun Exec.requireArtifact(artifact: Provider<Directory>) {
+fun Exec.requireArtifact(artifact: Provider<Directory>, images: Boolean = true) {
     val dir = artifact.map { it.asFile }
     val log = instanceDir.get().asFile.resolve("logs/latest.log")
+    val files = listOfNotNull("recipes.json", "images.pak".takeIf { images }, "meta.json")
     doLast {
-        val missing = listOf("recipes.json", "images.pak", "meta.json").filterNot { dir.get().resolve(it).isFile }
+        val missing = files.filterNot { dir.get().resolve(it).isFile }
         if (missing.isNotEmpty()) {
             throw GradleException(
                 "The game exited without finishing the artifact: ${missing.joinToString()} missing in ${dir.get()}. "
@@ -640,6 +641,24 @@ val dump = tasks.register<Exec>("dump") {
     }
 }
 
+/**
+ * The data-only artifact, recipes.json without images, in a directory of its own so it never replaces the full build's
+ * or moves `latest`, which other projects read images through.
+ */
+val dataArtifactDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir("$name-data") }
+
+val dumpData = tasks.register<Exec>("dumpData") {
+    group = "modpack"
+    description = "Boots the pack and writes recipes.json, categories.tsv and meta.json without rendering anything, into build/dumps/<pack>-<version>-data."
+
+    bootRenderer("data", dataArtifactDir, *rendererSettings.toTypedArray())
+    dumpInputs()
+    outputs.dir(dataArtifactDir)
+    requireArtifact(dataArtifactDir, images = false)
+    // After the full build, never beside it: two games at once would share the instance directory.
+    mustRunAfter(dump)
+}
+
 // The checks are the :dumper:compare tools, run on their own classpath. It carries webp-imageio's decoder half and its
 // Kotlin, which is fine out here: they are plain JVM programs, not the game.
 val compareToolScope = configurations.dependencyScope("compareTool")
@@ -654,7 +673,10 @@ dependencies {
     compareToolScope.name(project(":dumper:compare"))
 }
 
-/** Runs VerifyArtifact over [artifact]: every recipes.json entry's offset and length must be a decodable image. */
+/**
+ * Runs VerifyArtifact over [artifact]: every recipes.json entry's offset and length must be a decodable image, or, for
+ * a data-only artifact (meta.json says `"images": false`), every entry must parse and have no image.
+ */
 fun JavaExec.verify(artifact: Provider<Directory>) {
     group = "verification"
     classpath = compareToolPath.get()
@@ -679,6 +701,12 @@ val verifyDump = tasks.register<JavaExec>("verifyDump") {
     verify(artifactDir)
 }
 dump.configure { finalizedBy(verifyDump) }
+
+val verifyDumpData = tasks.register<JavaExec>("verifyDumpData") {
+    description = "Checks that the data-only artifact's recipes.json parses whole and that no entry claims an image."
+    verify(dataArtifactDir)
+}
+dumpData.configure { finalizedBy(verifyDumpData) }
 
 /** Where the rebuild check puts its second build of the same pack version. */
 val rebuildDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir("$name-rebuild") }

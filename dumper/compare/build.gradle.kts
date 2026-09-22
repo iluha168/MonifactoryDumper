@@ -73,7 +73,7 @@ tasks.register<JavaExec>("checkDetection") {
  */
 tasks.register<JavaExec>("verifyArtifact") {
     group = "verification"
-    description = "Checks that every recipes.json entry of an artifact resolves to a decodable image in images.pak."
+    description = "Checks that every recipes.json entry of an artifact resolves to a decodable image in images.pak, or has none in a data-only artifact."
 
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass = "com.iluha168.monifactory.compare.VerifyArtifact"

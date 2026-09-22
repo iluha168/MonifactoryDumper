@@ -41,12 +41,22 @@ public final class Dumper {
     enum Mode {
         /** The build: {@code recipes.json} for the whole corpus and {@code images.pak}, see {@link Batch}. */
         DUMP,
+        /**
+         * The build's {@code recipes.json}, {@code categories.tsv} and {@code meta.json} without any images, see
+         * {@link DataDump}. Takes {@code count}, {@code every} and {@code sample} the way the build does.
+         */
+        DATA,
         /** A seeded sample rendered to PNGs with a manifest, see {@link Sample}. */
         SAMPLE,
         /** The animation census over a sample, see {@link Census}. */
         CENSUS,
         /** Raw frame-hash sequences of a sample, for checking the detection rules offline, see {@link Seq}. */
         SEQ;
+
+        /** Whether the run writes meta.json, and so needs to know the pack's version and mode. */
+        boolean describesPack() {
+            return this == DUMP || this == DATA;
+        }
 
         static Mode of(String name) {
             try {
@@ -78,7 +88,7 @@ public final class Dumper {
         }
         Mode mode = Mode.of(System.getProperty(MODE_PROPERTY, "sample"));
         int count = Integer.getInteger(COUNT_PROPERTY, switch (mode) {
-            case DUMP -> Integer.MAX_VALUE;
+            case DUMP, DATA -> Integer.MAX_VALUE;
             case SAMPLE -> 1;
             case CENSUS -> 4000;
             case SEQ -> Seq.PER_CATEGORY;

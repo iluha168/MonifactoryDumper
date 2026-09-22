@@ -20,8 +20,8 @@ exits. It writes one directory per pack version:
 dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
   recipes.json     every recipe, one JSON record per line, each with the offset and length of its image
   images.pak       every image, lossless WebP (stills and looping animations), back to back
-  meta.json        pack name and version, Minecraft and Forge, the renderer jar's SHA-256, scale, frame policy,
-                   and whether this is the whole corpus or a sample
+  meta.json        pack name, version and mode, Minecraft and Forge, the renderer jar's SHA-256, scale, frame
+                   policy, and whether this is the whole corpus or a sample
   categories.tsv   recipes per EMI category, and how many the section 5 exclusions dropped
   animation.tsv    what the frame policy decided for each animated recipe
 dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
@@ -50,10 +50,41 @@ gets past it; the game's own `-Xmx` and Gradle's `org.gradle.jvmargs` come later
 JAVA_TOOL_OPTIONS=-Xmx5g ./gradlew :dumper:dump -Pmonifactory.heap=4G
 ```
 
+meta.json's `pack.version` and `pack.mode` come from the running game, not from a config file. The mode is KubeJS's
+`global.packmode`, which Monifactory's `kubejs/startup_scripts/_packmode.js` sets and every recipe script branches on
+(Normal, Hard or Expert). The version is the text FancyMenu puts after "Version" on the title screen, resolved through
+FancyMenu's own placeholder parser from its loaded title-screen layout. `pack.name` comes from the pack's
+`manifest.json`, since the game has no name for itself. If the manifest's version and the title screen's disagree, the
+run fails before it renders anything. The artifact directory is named after the manifest, so the two would otherwise
+contradict each other.
+
 Renderer settings go through `-Pmonifactory.dumper=key=value,...`. Two of them make a sample in about 1/N of the
 time. `every=N` renders every Nth recipe in corpus order, a proportional sample of every category, which is the one to
 estimate sizes and timings from. `sample=N` picks about one recipe in N by a hash of what the recipe is, which is the
 one two builds can be compared on (see below). meta.json marks either artifact `"partial": true`.
+
+## Recipes without images
+
+```sh
+./gradlew :dumper:dumpData -Pmonifactory.heap=4G
+```
+
+The same boot, the same corpus and the same `recipes.json` records, but nothing is drawn: every record's `frames`,
+`bytes` and `offset` are null. Once the pack and Forge are installed it takes about three minutes (boot, datapack
+reload and EMI's reload; writing the 90 MB `recipes.json` is under two seconds) where the full build takes hours. It
+writes a directory of its own that never replaces the full build's or moves `latest`:
+
+```
+dumper/build/dumps/<pack name>-<pack version>-data/     e.g. Monifactory-0.13.8-data
+  recipes.json     every recipe, one JSON record per line, with null image fields
+  meta.json        as for the full build, with "images": false; imagesBytes, scale, frameMillis, probes and
+                   framePolicy are null, since there are no images for them to describe
+  categories.tsv   as for the full build
+```
+
+`verifyDumpData` runs right after and fails the build unless every `recipes.json` line parses, no record claims an
+image, there is no `images.pak`, and meta.json counts the same recipes. `every=N`, `sample=N` and `count` work as they
+do for the full build, and mark the artifact `"partial": true` the same way.
 
 ## Updating to a new pack version
 

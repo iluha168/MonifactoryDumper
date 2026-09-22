@@ -30,6 +30,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * otherwise; the picture is {@code (w + 8) * scale} by {@code (h + 8) * scale}; and an animation loops forever and
  * runs {@code frames} times the frame length. {@code meta.json}, when there is one, must agree on the record count.
  * <p>
+ * A data-only artifact, whose {@code meta.json} says {@code "images": false}, has no {@code images.pak}. For it every
+ * entry must parse and have {@code frames}, {@code bytes} and {@code offset} all null, and there must be no pak.
+ * <p>
  * Usage: {@code --artifact <dir> [--threads <n>]}. Exits 1 on any failure and lists the first few.
  */
 public final class VerifyArtifact {
@@ -57,8 +60,9 @@ public final class VerifyArtifact {
         if (Files.isRegularFile(metaFile)) {
             meta = JsonParser.parseString(Files.readString(metaFile, StandardCharsets.UTF_8)).getAsJsonObject();
         }
-        int frameMillis = meta != null && meta.has("frameMillis") ? meta.get("frameMillis").getAsInt() : FRAME_MILLIS;
-        Integer scale = meta != null && meta.has("scale") ? meta.get("scale").getAsInt() : null;
+        // A data-only artifact has both, as nulls, since it has no images for them to describe.
+        int frameMillis = has(meta, "frameMillis") ? meta.get("frameMillis").getAsInt() : FRAME_MILLIS;
+        Integer scale = has(meta, "scale") ? meta.get("scale").getAsInt() : null;
 
         List<Entry> entries = load(artifact.resolve("recipes.json"));
         List<String> failures = new ArrayList<>();
@@ -68,6 +72,9 @@ public final class VerifyArtifact {
         }
 
         Path pakFile = artifact.resolve("images.pak");
+        if (meta != null && meta.has("images") && !meta.get("images").getAsBoolean()) {
+            return verifyData(artifact, meta, entries, failures, started);
+        }
         long pakSize = Files.size(pakFile);
         long end = 0;
         for (Entry entry : entries) {
@@ -149,6 +156,34 @@ public final class VerifyArtifact {
         System.out.println("FAILED: " + failures.size() + " problems; the first few:");
         failures.stream().limit(20).forEach(failure -> System.out.println("  " + failure));
         return failures.size();
+    }
+
+    private static int verifyData(Path artifact, JsonObject meta, List<Entry> entries, List<String> failures,
+                                  long started) {
+        if (Files.exists(artifact.resolve("images.pak"))) {
+            failures.add("meta.json says the artifact has no images, but there is an images.pak");
+        }
+        if (has(meta, "imagesBytes")) failures.add("meta.json has no images, but imagesBytes is set");
+        for (Entry entry : entries) {
+            if (entry.frames() != null || entry.bytes() != null || entry.offset() != null) {
+                failures.add(entry.name() + ": has an image (" + entry.frames() + " frames, " + entry.bytes() + " B at "
+                        + entry.offset() + ") in an artifact without images");
+            }
+        }
+        long seconds = (System.nanoTime() - started) / 1_000_000_000L;
+        System.out.printf("%s: %,d recipes, data only; checked in %d s%n", artifact, entries.size(), seconds);
+        System.out.println("meta.json: " + meta);
+        if (failures.isEmpty()) {
+            System.out.println("OK: every entry parses, and none claims an image");
+            return 0;
+        }
+        System.out.println("FAILED: " + failures.size() + " problems; the first few:");
+        failures.stream().limit(20).forEach(failure -> System.out.println("  " + failure));
+        return failures.size();
+    }
+
+    private static boolean has(JsonObject meta, String key) {
+        return meta != null && meta.has(key) && !meta.get(key).isJsonNull();
     }
 
     static List<Entry> load(Path file) throws IOException {

@@ -92,9 +92,10 @@ final class Batch {
 
     private final Minecraft minecraft;
     private final Path output;
+    private final Pack pack;
+    /** How the entries were picked out of the kept corpus, for meta.json. */
+    private final Selection selection;
     private final List<Corpus.Entry> entries;
-    /** How the entries were picked out of the kept corpus, for meta.json: its size, the sampling step, the cap. */
-    private final int corpusSize, every, sample, limit;
     private final State[] states;
     private final long[] firstHashes;
     /** The probe frame that first differed from frame 0, for animated recipes. */
@@ -141,15 +142,13 @@ final class Batch {
     private final AtomicInteger encodeCount = new AtomicInteger();
 
     @SuppressWarnings("unchecked")
-    private Batch(Minecraft minecraft, Path output, List<Corpus.Entry> entries, int corpusSize, int every, int sample,
-                  int limit, int threads, long bufferBytes) throws IOException {
+    private Batch(Minecraft minecraft, Pack pack, Path output, Selection selection, int threads, long bufferBytes)
+            throws IOException {
         this.minecraft = minecraft;
+        this.pack = pack;
         this.output = output;
-        this.entries = entries;
-        this.corpusSize = corpusSize;
-        this.every = every;
-        this.sample = sample;
-        this.limit = limit;
+        this.selection = selection;
+        this.entries = selection.entries();
         int n = entries.size();
         this.states = new State[n];
         Arrays.fill(states, State.PENDING);
@@ -181,19 +180,25 @@ final class Batch {
     private static final ThreadLocal<WebpEncoder> ENCODER = ThreadLocal.withInitial(WebpEncoder::new);
 
     /**
-     * Starts the build over the whole kept corpus, or its first {@code limit} recipes if that is fewer (a partial
-     * artifact, for trying the build out).
+     * The recipes a run writes: the whole kept corpus, or the sample {@link #EVERY_PROPERTY} or {@link #SAMPLE_PROPERTY}
+     * pick of it, or its first {@code limit} if that is fewer (a partial artifact, for trying the build out). The data
+     * mode picks the same way, so its {@code partial} means the same thing.
      */
-    static Batch start(Minecraft minecraft, Corpus corpus, Path output, int limit) throws IOException {
-        Files.createDirectories(output);
-        corpus.writeCategories(output.resolve("categories.tsv"));
+    record Selection(List<Corpus.Entry> entries, int corpus, int every, int sample, int limit) {
+        /** A sample or a capped run is a partial artifact. It is valid, but it is not the pack. */
+        boolean partial() {
+            return every > 1 || sample > 1 || entries.size() < corpus;
+        }
+    }
+
+    static Selection select(Corpus corpus, int limit) {
         List<Corpus.Entry> entries = corpus.kept;
         int every = Integer.getInteger(EVERY_PROPERTY, 1);
         if (every < 1) throw new IllegalArgumentException(EVERY_PROPERTY + " must be at least 1, not " + every);
         if (every > 1) {
             List<Corpus.Entry> sample = new ArrayList<>(entries.size() / every + 1);
             for (int i = 0; i < entries.size(); i += every) sample.add(entries.get(i));
-            LOG.warn("[dumper] rendering every {}th of {} kept recipes, {} in all; the artifact is a sample", every,
+            LOG.warn("[dumper] taking every {}th of {} kept recipes, {} in all; the artifact is a sample", every,
                     entries.size(), sample.size());
             entries = sample;
         }
@@ -204,21 +209,30 @@ final class Batch {
             for (Corpus.Entry entry : entries) {
                 if (Long.remainderUnsigned(Sample.score(0, stableKey(entry)), sample) == 0) picked.add(entry);
             }
-            LOG.warn("[dumper] rendering a 1-in-{} sample of {} kept recipes by recipe hash, {} in all; the artifact is"
+            LOG.warn("[dumper] taking a 1-in-{} sample of {} kept recipes by recipe hash, {} in all; the artifact is"
                     + " a sample", sample, entries.size(), picked.size());
             entries = picked;
         }
         if (limit < entries.size()) {
-            LOG.warn("[dumper] rendering only the first {} of {} kept recipes; the artifact is partial", limit,
+            LOG.warn("[dumper] taking only the first {} of {} kept recipes; the artifact is partial", limit,
                     entries.size());
             entries = entries.subList(0, limit);
         }
+        return new Selection(entries, corpus.kept.size(), every, sample, limit);
+    }
+
+    /** Starts the build over {@link #select}'s recipes. */
+    static Batch start(Minecraft minecraft, Corpus corpus, Pack pack, Path output, int limit) throws IOException {
+        Files.createDirectories(output);
+        corpus.writeCategories(output.resolve("categories.tsv"));
+        Selection selection = select(corpus, limit);
         int threads = Integer.getInteger(ENCODERS_PROPERTY, Math.max(1, Runtime.getRuntime().availableProcessors() - 2));
         long buffer = Long.getLong(BUFFER_PROPERTY, 1024L) << 20;
         LOG.info("[dumper] batch: {} recipes in chunks of {}, probes {} after {} warm-up draws, then strict periods up"
-                        + " to {} frames (trim to {}); {} encoder threads, {} MiB encode buffer", entries.size(), CHUNK,
-                Arrays.toString(PROBES), WARM_UP, FramePolicy.CAP, FramePolicy.TRIM, threads, buffer >> 20);
-        return new Batch(minecraft, output, entries, corpus.kept.size(), every, sample, limit, threads, buffer);
+                        + " to {} frames (trim to {}); {} encoder threads, {} MiB encode buffer",
+                selection.entries().size(), CHUNK, Arrays.toString(PROBES), WARM_UP, FramePolicy.CAP, FramePolicy.TRIM,
+                threads, buffer >> 20);
+        return new Batch(minecraft, pack, output, selection, threads, buffer);
     }
 
     /**
@@ -579,8 +593,7 @@ final class Batch {
 
         writeAnimation(output.resolve("animation.tsv"));
         RecipeJson.writeFile(entries, images, output.resolve("recipes.json"));
-        Meta.write(output.resolve("meta.json"), minecraft, entries.size(), corpusSize, every, sample, limit, failed,
-                pak.size());
+        Meta.write(output.resolve("meta.json"), pack, selection, failed, pak.size(), RecipeRenderer.scale(minecraft));
         if (failed > 0) {
             StringBuilder first = new StringBuilder();
             for (int i = 0, shown = 0; i < entries.size() && shown < 10; i++) {

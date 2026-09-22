@@ -33,7 +33,7 @@ final class DumperOverlay extends Overlay {
      */
     private static final long SERVER_RELOAD_TIMEOUT = TimeUnit.MINUTES.toMillis(10);
 
-    private enum Step { BOOT, SERVER_RELOAD, JOIN, EMI, RENDER, EXIT, DONE }
+    private enum Step { BOOT, SERVER_RELOAD, JOIN, EMI, PACK, RENDER, EXIT, DONE }
 
     private final Minecraft minecraft;
     private final ReloadInstance bootReload;
@@ -42,6 +42,9 @@ final class DumperOverlay extends Overlay {
     private Step step = Step.BOOT;
     private CompletableFuture<DataPlane.Server> serverReload;
     private long serverReloadSince, emiSince;
+    private Corpus corpus;
+    /** Asked once a frame until FancyMenu has read the version, see {@link Pack}. */
+    private Pack.Resolver packResolver;
     /** The render step's work, one frame's budget per call; true once it is done. */
     private Work work;
 
@@ -113,13 +116,34 @@ final class DumperOverlay extends Overlay {
                     return Step.EMI;
                 }
                 LOG.info("[dumper] EMI loaded in {} ms", System.currentTimeMillis() - emiSince);
-                Corpus corpus = Corpus.of(EmiApi.getRecipeManager());
+                corpus = Corpus.of(EmiApi.getRecipeManager());
+                if (!job.mode().describesPack()) {
+                    work = switch (job.mode()) {
+                        case SAMPLE -> Sample.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                        case CENSUS -> Census.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                        case SEQ -> Seq.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                        default -> throw new IllegalStateException("no work for " + job.mode());
+                    };
+                    return Step.RENDER;
+                }
+                // Before the batch rather than when meta.json is written, so a version that disagrees with the manifest
+                // fails the build in minutes, not at the end of it.
+                packResolver = new Pack.Resolver();
+                return Step.PACK;
+            }
+            case PACK -> {
+                Pack pack = packResolver.poll();
+                if (pack == null) return Step.PACK;
+                packResolver = null;
                 work = switch (job.mode()) {
-                    case DUMP -> Batch.start(minecraft, corpus, job.output(), job.count())::advance;
-                    case SAMPLE -> Sample.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
-                    case CENSUS -> Census.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
-                    case SEQ -> Seq.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                    case DUMP -> Batch.start(minecraft, corpus, pack, job.output(), job.count())::advance;
+                    case DATA -> {
+                        DataDump.write(corpus, pack, job.output(), job.count());
+                        yield () -> true;
+                    }
+                    default -> throw new IllegalStateException("no work for " + job.mode());
                 };
+                corpus = null;
                 return Step.RENDER;
             }
             case RENDER -> {
