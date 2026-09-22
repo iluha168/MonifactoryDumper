@@ -24,7 +24,12 @@ dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
                    and whether this is the whole corpus or a sample
   categories.tsv   recipes per EMI category, and how many the section 5 exclusions dropped
   animation.tsv    what the frame policy decided for each animated recipe
+dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
 ```
+
+Other projects get the artifact through the `dumpArtifact` configuration, which is `latest`. Gradle needs an artifact's
+path while it resolves dependencies, before the download has said which pack version this is, so the link is what it
+can name.
 
 `verifyDump` runs right after and fails the build unless every `recipes.json` entry resolves to an image in
 `images.pak` that decodes in full, at its recipe's size, and for an animation loops forever and runs for its frame
@@ -35,6 +40,15 @@ more), and hours of wall clock. Rendering is the long part, since about 43% of r
 drawn frame by frame until its loop closes or 400 frames go by. The first run also downloads about 1 GB (the pack,
 Minecraft, Forge's libraries and the game's assets). Run it on an otherwise idle machine: if an out-of-memory killer
 takes the game, the build fails with exit 143 and starts over next time.
+
+On the very first build, ForgeGradle's Mavenizer decompiles Minecraft in a JVM of its own with `-Xms4G` and no
+maximum, so it may take a quarter of the machine's RAM. On a machine with little free memory that JVM is the one an
+out-of-memory killer picks (seen here as "Failed to run MCP Step (exit code 143)"). Capping every JVM the build starts
+gets past it; the game's own `-Xmx` and Gradle's `org.gradle.jvmargs` come later on their command lines and still win:
+
+```sh
+JAVA_TOOL_OPTIONS=-Xmx5g ./gradlew :dumper:dump -Pmonifactory.heap=4G
+```
 
 Renderer settings go through `-Pmonifactory.dumper=key=value,...`. Two of them make a sample in about 1/N of the
 time. `every=N` renders every Nth recipe in corpus order, a proportional sample of every category, which is the one to

@@ -1,5 +1,7 @@
 @file:Suppress("UnstableApiUsage")
 
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 
 plugins {
@@ -244,9 +246,15 @@ val writeLaunchArgs = tasks.register("writeLaunchArgs") {
     description = "Turns the vanilla and Forge version manifests into a java @argfile."
 
     // files.json is the Mavenizer's index of what it wrote, so no vanilla path here is guessed.
-    val filesJson = vanillaFiles.map { vanillaDir.get().file("files.json").asFile }
+    // Through the task's output files, not the task: a provider of those knows vanillaFiles makes it, so the
+    // configuration cache stores it unread and it is parsed when this task runs. Mapped off the task itself, it would
+    // be read while the cache entry is written, and on a clean build files.json does not exist yet.
+    // The lambdas capture plain Files, never the script's own values, which the cache cannot store.
+    val vanillaRootDir = vanillaDir.get().asFile
+    val vanillaIndex = vanillaRootDir.resolve("files.json")
+    val filesJson = objects.fileCollection().from(vanillaFiles).elements.map { vanillaIndex }
     fun vanillaFile(key: String) = filesJson.map { index ->
-        vanillaDir.get().asFile.resolve((groovy.json.JsonSlurper().parse(index) as Map<*, *>)[key] as String)
+        vanillaRootDir.resolve((groovy.json.JsonSlurper().parse(index) as Map<*, *>)[key] as String)
     }
     val vanillaJson = vanillaFile("version")
     val vanillaLibList = vanillaFile("client.libraries")
@@ -558,10 +566,12 @@ class ArgFile(private val file: Provider<RegularFile>) : CommandLineArgumentProv
 
 /**
  * The pack's own name for itself, "<name>-<version>" out of the manifest.json the download checked against the pins,
- * e.g. Monifactory-0.13.8. Read when a task runs, since the pack is downloaded by then and not before.
+ * e.g. Monifactory-0.13.8. Read when a task runs, since the pack is downloaded by then and not before. It goes through
+ * the files' elements rather than the configuration itself: that provider knows downloadPack produces it, so a task
+ * that takes it as an input waits for the download instead of reading the manifest while the task graph is built.
  */
-val packName: Provider<String> = pack.map { configuration ->
-    configuration.incoming.files.singleFile.resolve("manifest.json")
+val packName: Provider<String> = pack.flatMap { it.incoming.files.elements }.map { elements ->
+    elements.single().asFile.resolve("manifest.json")
 }.map { manifest ->
     val json = groovy.json.JsonSlurper().parse(manifest) as Map<*, *>
     // It becomes a directory name, so nothing in it may be a path separator or confuse a shell.
@@ -574,6 +584,7 @@ val packName: Provider<String> = pack.map { configuration ->
  */
 val dumpsDir = layout.buildDirectory.dir("dumps")
 val artifactDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir(name) }
+val latestDump = dumpsDir.get().dir("latest")
 
 // What the artifact is a function of: the renderer, the pack and the launch. The instance directory itself is not an
 // input, since the game writes logs and options into it on every boot.
@@ -596,6 +607,16 @@ val dump = tasks.register<Exec>("dump") {
     bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
     dumpInputs()
     outputs.dir(artifactDir)
+
+    // build/dumps/latest, a relative symlink to the artifact this task last finished. It is what dumpArtifact hands to
+    // other projects: Gradle wants an artifact's path while it resolves the dependency graph, which is before the
+    // download has said which pack version this is.
+    val latest = latestDump.asFile.toPath()
+    val target = artifactDir.map { it.asFile.name }
+    doLast {
+        Files.deleteIfExists(latest)
+        Files.createSymbolicLink(latest, Path.of(target.get()))
+    }
 }
 
 // The checks are the :dumper:compare tools, run on their own classpath. It carries webp-imageio's decoder half and its
@@ -688,7 +709,7 @@ tasks.register<JavaExec>("rebuildCheck") {
 val dumpArtifact = configurations.consumable("dumpArtifact")
 
 artifacts {
-    add(dumpArtifact.name, artifactDir) {
+    add(dumpArtifact.name, latestDump) {
         builtBy(dump)
     }
 }
