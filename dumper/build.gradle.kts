@@ -600,6 +600,26 @@ fun Exec.dumpInputs() {
     timeout = Duration.ofHours(12)
 }
 
+/**
+ * Fails the task unless the game left a finished artifact in [artifact]. The renderer writes meta.json last, after
+ * recipes.json and images.pak, so its absence means the run ended early. A clean exit is not proof: when the heap runs
+ * out, Minecraft's own out-of-memory handling stops the game and the JVM still exits 0 (seen with a 3G heap during
+ * EMI's reload), and without this the build would report success with no artifact at all.
+ */
+fun Exec.requireArtifact(artifact: Provider<Directory>) {
+    val dir = artifact.map { it.asFile }
+    val log = instanceDir.get().asFile.resolve("logs/latest.log")
+    doLast {
+        val missing = listOf("recipes.json", "images.pak", "meta.json").filterNot { dir.get().resolve(it).isFile }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "The game exited without finishing the artifact: ${missing.joinToString()} missing in ${dir.get()}. "
+                    + "The reason is in $log (look for OutOfMemoryError or the last [dumper] line)."
+            )
+        }
+    }
+}
+
 val dump = tasks.register<Exec>("dump") {
     group = "modpack"
     description = "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, images.pak and meta.json."
@@ -607,6 +627,7 @@ val dump = tasks.register<Exec>("dump") {
     bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
     dumpInputs()
     outputs.dir(artifactDir)
+    requireArtifact(artifactDir)
 
     // build/dumps/latest, a relative symlink to the artifact this task last finished. It is what dumpArtifact hands to
     // other projects: Gradle wants an artifact's path while it resolves the dependency graph, which is before the
@@ -669,6 +690,7 @@ val rebuild = tasks.register<Exec>("rebuild") {
     bootRenderer("dump", rebuildDir, *rendererSettings.toTypedArray())
     dumpInputs()
     outputs.dir(rebuildDir)
+    requireArtifact(rebuildDir)
     // Its whole point is to boot again.
     outputs.upToDateWhen { false }
     // After the first build, never beside it: two games at once would share the instance directory.

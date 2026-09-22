@@ -36,8 +36,8 @@ can name.
 count. `./gradlew :dumper:compare:verifyArtifact -Pmonifactory.artifact=<dir>` runs the same check on any directory.
 
 What it costs: a GPU with an EGL driver, about 7 GB of RAM at `-Pmonifactory.heap=4G` (the default 8G heap wants
-more), and hours of wall clock. Rendering is the long part, since about 43% of recipes animate and each animated one is
-drawn frame by frame until its loop closes or 400 frames go by. The first run also downloads about 1 GB (the pack,
+more; 3G is too small and runs out during EMI's reload), and hours of wall clock. Rendering is the long part, since
+about 43% of recipes animate and each animated one is drawn frame by frame until its loop closes or 400 frames go by. The first run also downloads about 1 GB (the pack,
 Minecraft, Forge's libraries and the game's assets). Run it on an otherwise idle machine: if an out-of-memory killer
 takes the game, the build fails with exit 143 and starts over next time.
 
@@ -142,5 +142,8 @@ few dozen recipes between boots, so two `every` samples hold different recipes a
   before the renderer exists to notice. The dump task gives up after 12 hours; kill it sooner if the log stops moving
   before the `[dumper]` lines start, and run it again.
 - The server datapack reload has a 10 minute timeout of its own and fails the run if it hangs.
+- If the game exits before meta.json is written, the dump fails with "The game exited without finishing the
+  artifact", even when the JVM's status was 0. Running out of heap ends that way: Minecraft stops itself on an
+  `OutOfMemoryError` and exits cleanly. Give it more `-Pmonifactory.heap`.
 - The renderer ends the JVM with status 1 on any failure (never through Minecraft's crash screen, which a mod in the
   pack would turn into a return to the title screen). The reason is in `dumper/build/instance/logs/latest.log`.
