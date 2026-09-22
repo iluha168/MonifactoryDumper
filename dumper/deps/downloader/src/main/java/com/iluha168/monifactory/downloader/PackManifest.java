@@ -17,17 +17,23 @@ record PackManifest(String minecraft, String forge, String overrides, List<Entry
         var root = new Gson().fromJson(json, JsonObject.class);
         var mc = root.getAsJsonObject("minecraft");
 
+        // The launcher installs the primary loader and nothing else, so that entry is the one that counts. Two of them
+        // would leave it to whichever launcher reads the pack, and this build would have no way to know which.
         String forge = null;
         for (var element : mc.getAsJsonArray("modLoaders")) {
             var loader = element.getAsJsonObject();
-            if (loader.get("primary").getAsBoolean()) {
-                String id = loader.get("id").getAsString();
-                if (!id.startsWith(FORGE_PREFIX)) {
-                    throw new IllegalStateException("pack runs on '" + id + "', but this build only knows Forge");
-                }
-                forge = id.substring(FORGE_PREFIX.length());
-                break;
+            var primary = loader.get("primary");
+            if (primary == null || !primary.getAsBoolean()) {
+                continue;
             }
+            if (forge != null) {
+                throw new IllegalStateException("manifest.json declares more than one primary mod loader");
+            }
+            String id = loader.get("id").getAsString();
+            if (!id.startsWith(FORGE_PREFIX)) {
+                throw new IllegalStateException("pack runs on '" + id + "', but this build only knows Forge");
+            }
+            forge = id.substring(FORGE_PREFIX.length());
         }
         if (forge == null) {
             throw new IllegalStateException("manifest.json declares no primary mod loader");

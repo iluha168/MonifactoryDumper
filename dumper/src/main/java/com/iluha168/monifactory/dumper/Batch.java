@@ -81,12 +81,20 @@ final class Batch {
      * size, and its totals times this factor estimate the full build's in a fraction of the hours. Default 1, all.
      */
     static final String EVERY_PROPERTY = "monifactory.dumper.every";
+    /**
+     * Renders about one kept recipe in this many, picked by a hash of what the recipe is rather than where it sits, so
+     * two boots pick the same recipes even though EMI's list drifts by a few dozen between them. {@link #EVERY_PROPERTY}
+     * is the better size estimate; this is the sample two builds can be compared on (the rebuild check). Default 1.
+     */
+    static final String SAMPLE_PROPERTY = "monifactory.dumper.sample";
 
     private enum State { PENDING, ANIMATED, STATIC, FAILED }
 
     private final Minecraft minecraft;
     private final Path output;
     private final List<Corpus.Entry> entries;
+    /** How the entries were picked out of the kept corpus, for meta.json: its size, the sampling step, the cap. */
+    private final int corpusSize, every, sample, limit;
     private final State[] states;
     private final long[] firstHashes;
     /** The probe frame that first differed from frame 0, for animated recipes. */
@@ -133,11 +141,15 @@ final class Batch {
     private final AtomicInteger encodeCount = new AtomicInteger();
 
     @SuppressWarnings("unchecked")
-    private Batch(Minecraft minecraft, Path output, List<Corpus.Entry> entries, int threads, long bufferBytes)
-            throws IOException {
+    private Batch(Minecraft minecraft, Path output, List<Corpus.Entry> entries, int corpusSize, int every, int sample,
+                  int limit, int threads, long bufferBytes) throws IOException {
         this.minecraft = minecraft;
         this.output = output;
         this.entries = entries;
+        this.corpusSize = corpusSize;
+        this.every = every;
+        this.sample = sample;
+        this.limit = limit;
         int n = entries.size();
         this.states = new State[n];
         Arrays.fill(states, State.PENDING);
@@ -185,6 +197,17 @@ final class Batch {
                     entries.size(), sample.size());
             entries = sample;
         }
+        int sample = Integer.getInteger(SAMPLE_PROPERTY, 1);
+        if (sample < 1) throw new IllegalArgumentException(SAMPLE_PROPERTY + " must be at least 1, not " + sample);
+        if (sample > 1) {
+            List<Corpus.Entry> picked = new ArrayList<>(entries.size() / sample + 1);
+            for (Corpus.Entry entry : entries) {
+                if (Long.remainderUnsigned(Sample.score(0, stableKey(entry)), sample) == 0) picked.add(entry);
+            }
+            LOG.warn("[dumper] rendering a 1-in-{} sample of {} kept recipes by recipe hash, {} in all; the artifact is"
+                    + " a sample", sample, entries.size(), picked.size());
+            entries = picked;
+        }
         if (limit < entries.size()) {
             LOG.warn("[dumper] rendering only the first {} of {} kept recipes; the artifact is partial", limit,
                     entries.size());
@@ -195,7 +218,38 @@ final class Batch {
         LOG.info("[dumper] batch: {} recipes in chunks of {}, probes {} after {} warm-up draws, then strict periods up"
                         + " to {} frames (trim to {}); {} encoder threads, {} MiB encode buffer", entries.size(), CHUNK,
                 Arrays.toString(PROBES), WARM_UP, FramePolicy.CAP, FramePolicy.TRIM, threads, buffer >> 20);
-        return new Batch(minecraft, output, entries, threads, buffer);
+        return new Batch(minecraft, output, entries, corpus.kept.size(), every, sample, limit, threads, buffer);
+    }
+
+    /**
+     * What a recipe is, in terms that hold from boot to boot: its category and its ids where it has any. A recipe with
+     * neither id is its category, display class, size and the ids of its stacks, each list sorted and without counts
+     * or NBT, since those are what the pack varies per boot (tag member order, NBT variants, GT's fluid amounts).
+     */
+    static String stableKey(Corpus.Entry entry) {
+        EmiRecipe recipe = entry.recipe();
+        String emiId = recipe.getId() == null ? null : recipe.getId().toString();
+        String underlying = null;
+        try {
+            var backing = recipe.getBackingRecipe();
+            if (backing != null) underlying = backing.getId().toString();
+        } catch (RuntimeException e) {
+            // Some bridged recipes cannot name what backs them; the rest of the key still stands.
+        }
+        StringBuilder key = new StringBuilder(entry.category()).append('|');
+        if (emiId != null || underlying != null) return key.append(emiId).append('|').append(underlying).toString();
+        key.append(recipe.getClass().getName()).append('|').append(recipe.getDisplayWidth()).append('x')
+                .append(recipe.getDisplayHeight());
+        for (List<? extends dev.emi.emi.api.stack.EmiIngredient> list : List.of(recipe.getInputs(),
+                recipe.getCatalysts(), recipe.getOutputs())) {
+            List<String> ids = new ArrayList<>();
+            for (var ingredient : list) {
+                for (var stack : ingredient.getEmiStacks()) ids.add(String.valueOf(stack.getId()));
+            }
+            ids.sort(null);
+            key.append('|').append(String.join(",", ids));
+        }
+        return key.toString();
     }
 
     /** Works for one frame's budget. Returns true once {@code images.pak} and {@code recipes.json} are written. */
@@ -525,6 +579,8 @@ final class Batch {
 
         writeAnimation(output.resolve("animation.tsv"));
         RecipeJson.writeFile(entries, images, output.resolve("recipes.json"));
+        Meta.write(output.resolve("meta.json"), minecraft, entries.size(), corpusSize, every, sample, limit, failed,
+                pak.size());
         if (failed > 0) {
             StringBuilder first = new StringBuilder();
             for (int i = 0, shown = 0; i < entries.size() && shown < 10; i++) {

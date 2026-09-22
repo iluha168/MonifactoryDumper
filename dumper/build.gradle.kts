@@ -458,20 +458,23 @@ fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properti
 
     val instance = instanceDir.get().asFile
     val natives = nativesDir.get().asFile
-    val out = output.get().asFile
+    // Lazy, since an artifact directory is named after the pack, and that is not known until the pack is downloaded.
+    val out = output.map { it.asFile }
     doFirst {
         instance.mkdirs()
         natives.mkdirs()
         // Every run writes a whole set; a file left over from the last one would pass for part of this one.
-        out.deleteRecursively()
+        out.get().deleteRecursively()
     }
     doFirst(HeadlessInstance(instance))
 
     workingDir = instance
     executable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
-    // Before the argfile, since everything after its main class is an argument to the game.
-    args("-Dmonifactory.dumper.mode=$mode", "-Dmonifactory.dumper.output=" + out.absolutePath)
+    // Before the argfile, since everything after its main class is an argument to the game. Plain args always come
+    // before the argument providers, and the providers keep their order.
+    args("-Dmonifactory.dumper.mode=$mode")
     properties.forEach { (key, value) -> args("-Dmonifactory.dumper.$key=$value") }
+    argumentProviders.add(SystemProperty("monifactory.dumper.output", out))
     argumentProviders.add(ArgFile(launchArgs))
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack
@@ -488,7 +491,7 @@ val sampleCount = providers.gradleProperty("monifactory.sample.count")
 val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
 /**
  * Any other renderer setting, as -Pmonifactory.dumper=key=value[,key=value...], each passed on as
- * -Dmonifactory.dumper.key=value: encoders, encodeBufferMiB, keepFramesEvery, every, checkPipeline, checkSync.
+ * -Dmonifactory.dumper.key=value: encoders, encodeBufferMiB, keepFramesEvery, every, sample, checkPipeline, checkSync.
  */
 val rendererSettings = providers.gradleProperty("monifactory.dumper").map { settings ->
     settings.split(",").filter { it.isNotBlank() }.map {
@@ -542,32 +545,144 @@ class HeadlessInstance(private val instance: File) : Action<Task> {
     }
 }
 
+/** A -D argument whose value is only known when the task runs. */
+class SystemProperty(private val key: String, private val value: Provider<File>) : CommandLineArgumentProvider {
+    override fun asArguments() = listOf("-D$key=" + value.get().absolutePath)
+}
+
 /** Kept out of the task body so the configuration cache has a class to serialize, not a script. */
 class ArgFile(private val file: Provider<RegularFile>) : CommandLineArgumentProvider {
     override fun asArguments() = listOf("@" + file.get().asFile.absolutePath)
 }
 
 
-// TODO Version the artifact by the pack version the dump came from.
-val artifactDir = layout.buildDirectory.dir("dumps/version-TODO")
+/**
+ * The pack's own name for itself, "<name>-<version>" out of the manifest.json the download checked against the pins,
+ * e.g. Monifactory-0.13.8. Read when a task runs, since the pack is downloaded by then and not before.
+ */
+val packName: Provider<String> = pack.map { configuration ->
+    configuration.incoming.files.singleFile.resolve("manifest.json")
+}.map { manifest ->
+    val json = groovy.json.JsonSlurper().parse(manifest) as Map<*, *>
+    // It becomes a directory name, so nothing in it may be a path separator or confuse a shell.
+    "${json["name"]}-${json["version"]}".replace(Regex("[^A-Za-z0-9._+-]"), "_")
+}
 
-val dump = tasks.register<Exec>("dump") {
-    group = "modpack"
-    description = "Boots the pack and writes the artifact directory: recipes.json and images.pak, stills and animations."
+/**
+ * The artifact directory, one per pack version. A new pack version writes a new directory and the old one stays valid
+ * until it is deleted; only a rebuild of the same version replaces its own.
+ */
+val dumpsDir = layout.buildDirectory.dir("dumps")
+val artifactDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir(name) }
 
-    bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
-    // The artifact is a function of the renderer, the pack and the launch; the instance directory itself is not an
-    // input, since the game writes logs and options into it on every boot.
+// What the artifact is a function of: the renderer, the pack and the launch. The instance directory itself is not an
+// input, since the game writes logs and options into it on every boot.
+fun Exec.dumpInputs() {
     inputs.files(tasks.named("renameJar")).withPropertyName("renderer")
     inputs.files(pack.get().incoming.files).withPropertyName("pack")
     inputs.files(writeLaunchArgs).withPropertyName("launch")
     inputs.property("settings", rendererSettings.joinToString(",") { (key, value) -> "$key=$value" })
-    outputs.dir(artifactDir)
     // One boot in eight has been seen to hang in mod construction, before the renderer exists to notice. A boot is
     // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets. The batch is
     // then hours: every animated recipe is drawn until its loop closes or 400 frames go by, and about half of them
     // never close. The limit is there for a boot that never gets going, not to bound the batch.
     timeout = Duration.ofHours(12)
+}
+
+val dump = tasks.register<Exec>("dump") {
+    group = "modpack"
+    description = "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, images.pak and meta.json."
+
+    bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
+    dumpInputs()
+    outputs.dir(artifactDir)
+}
+
+// The checks are the :dumper:compare tools, run on their own classpath. It carries webp-imageio's decoder half and its
+// Kotlin, which is fine out here: they are plain JVM programs, not the game.
+val compareToolScope = configurations.dependencyScope("compareTool")
+val compareToolPath = configurations.resolvable("compareToolPath") {
+    extendsFrom(compareToolScope.get())
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+    }
+}
+dependencies {
+    compareToolScope.name(project(":dumper:compare"))
+}
+
+/** Runs VerifyArtifact over [artifact]: every recipes.json entry's offset and length must be a decodable image. */
+fun JavaExec.verify(artifact: Provider<Directory>) {
+    group = "verification"
+    classpath = compareToolPath.get()
+    mainClass = "com.iluha168.monifactory.compare.VerifyArtifact"
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+    maxHeapSize = "2G"
+
+    val dir = artifact.map { it.asFile }
+    inputs.files(artifact).withPropertyName("artifact")
+    // Up to date for as long as the artifact is. A marker, since the check itself writes nothing.
+    val marker = layout.buildDirectory.file("tmp/$name/verified")
+    outputs.file(marker)
+    argumentProviders.add(CommandLineArgumentProvider { listOf("--artifact", dir.get().absolutePath) })
+    // A dump that stopped before writing recipes.json has nothing to check, and its own failure says why.
+    onlyIf("the artifact has a recipes.json") { dir.get().resolve("recipes.json").isFile }
+    val markerFile = marker.map { it.asFile }
+    doLast { markerFile.get().writeText("") }
+}
+
+val verifyDump = tasks.register<JavaExec>("verifyDump") {
+    description = "Checks that every recipes.json entry of the artifact resolves to a decodable image in images.pak."
+    verify(artifactDir)
+}
+dump.configure { finalizedBy(verifyDump) }
+
+/** Where the rebuild check puts its second build of the same pack version. */
+val rebuildDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir("$name-rebuild") }
+
+val rebuild = tasks.register<Exec>("rebuild") {
+    group = "modpack"
+    description = "Builds the artifact of the same pack version a second time, into build/dumps/<pack>-<version>-rebuild."
+
+    bootRenderer("dump", rebuildDir, *rendererSettings.toTypedArray())
+    dumpInputs()
+    outputs.dir(rebuildDir)
+    // Its whole point is to boot again.
+    outputs.upToDateWhen { false }
+    // After the first build, never beside it: two games at once would share the instance directory.
+    mustRunAfter(dump)
+}
+
+val verifyRebuild = tasks.register<JavaExec>("verifyRebuild") {
+    description = "Checks that every recipes.json entry of the rebuild resolves to a decodable image in images.pak."
+    verify(rebuildDir)
+}
+rebuild.configure { finalizedBy(verifyRebuild) }
+
+/**
+ * PLAN section 7: the same pack version built twice must agree as sets, recipe for recipe, and any difference must be
+ * a documented one: GregTech's flicker, the TMRV/info drift, or a pixel change inside one boot-varying slot. Byte
+ * identity is not the bar, because the pack does not boot the same way twice.
+ */
+tasks.register<JavaExec>("rebuildCheck") {
+    group = "verification"
+    description = "Builds the current pack version twice and compares the two artifacts under the section 7 set-based rules."
+    dependsOn(dump, rebuild, verifyDump, verifyRebuild)
+
+    classpath = compareToolPath.get()
+    mainClass = "com.iluha168.monifactory.compare.CompareDumps"
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+    // A 90 MB recipes.json twice over, as objects.
+    maxHeapSize = "4G"
+
+    val first = artifactDir.map { it.asFile }
+    val second = rebuildDir.map { it.asFile }
+    val report = layout.buildDirectory.file("rebuild-compare.tsv").map { it.asFile }
+    argumentProviders.add(CommandLineArgumentProvider {
+        listOf("--a", first.get().absolutePath, "--b", second.get().absolutePath, "--out", report.get().absolutePath)
+    })
+    outputs.upToDateWhen { false }
 }
 
 val dumpArtifact = configurations.consumable("dumpArtifact")

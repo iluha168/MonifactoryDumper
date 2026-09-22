@@ -140,6 +140,15 @@ public final class CompareDumps {
     }
 
     int run() throws IOException {
+        // Two samples drawn differently share almost no recipes, and every one of them would read as a regression.
+        String sampleA = sampling(a), sampleB = sampling(b);
+        if (!sampleA.equals(sampleB) || sampleA.matches("every=(?!1 ).*")) {
+            // every=N picks by position, and EMI's list drifts between boots, so two such samples hold different
+            // recipes even when drawn alike. sample=N picks by what the recipe is.
+            System.out.println("DISAGREE: the artifacts cannot be compared recipe for recipe (A " + sampleA + ", B "
+                    + sampleB + "); build both whole, or both with the same -Pmonifactory.dumper=sample=N");
+            return 1;
+        }
         List<Recipe> left = load(a.resolve("recipes.json"));
         List<Recipe> right = load(b.resolve("recipes.json"));
         System.out.printf("A %s: %,d recipes, %s%n", a, left.size(), statics(left));
@@ -218,6 +227,14 @@ public final class CompareDumps {
         System.out.println(unexplained == 0 ? "AGREE: every difference is a documented one"
                 : "DISAGREE: " + unexplained + " differences are not explained");
         return unexplained;
+    }
+
+    /** How meta.json says the artifact was sampled, or "unknown" for one from before meta.json existed. */
+    static String sampling(Path artifact) throws IOException {
+        Path meta = artifact.resolve("meta.json");
+        if (!Files.isRegularFile(meta)) return "unknown";
+        JsonObject json = JsonParser.parseString(Files.readString(meta, StandardCharsets.UTF_8)).getAsJsonObject();
+        return "every=" + json.get("every") + " sample=" + json.get("sample") + " limit=" + json.get("limit");
     }
 
     private static String statics(List<Recipe> recipes) {

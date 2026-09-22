@@ -185,13 +185,17 @@ final class RecipeRenderer {
      * Draws {@code recipe} into a target of its size and returns the target, still holding the frame. Targets of one
      * size are told apart by {@code variant}, so {@link Pipeline} can draw into one while the other is being copied.
      */
+    /** Pixels per GUI pixel, EMI's screenshot scale. 0 in its config means the window's GUI scale, headless 2. */
+    static int scale(Minecraft minecraft) {
+        return EmiConfig.recipeScreenshotScale < 1
+                ? (int) minecraft.getWindow().getGuiScale()
+                : EmiConfig.recipeScreenshotScale;
+    }
+
     private static RenderTarget drawTo(Minecraft minecraft, EmiRecipe recipe, long millis, int variant) {
         int width = recipe.getDisplayWidth() + PADDING;
         int height = recipe.getDisplayHeight() + PADDING;
-        // 0 in the config means "the window's GUI scale", and the headless window's is 2.
-        int scale = EmiConfig.recipeScreenshotScale < 1
-                ? (int) minecraft.getWindow().getGuiScale()
-                : EmiConfig.recipeScreenshotScale;
+        int scale = scale(minecraft);
 
         RenderTarget target = TARGETS.get(width * scale, height * scale, variant);
         target.setClearColor(0f, 0f, 0f, 0f);

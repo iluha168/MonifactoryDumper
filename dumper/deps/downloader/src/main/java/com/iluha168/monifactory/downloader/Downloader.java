@@ -41,7 +41,9 @@ public final class Downloader {
         long length = latest.get("fileLength").getAsLong();
         System.out.println(latest.get("fileName").getAsString() + " (" + mib(length) + ")");
 
-        if (!hasLength(zip, length)) {
+        // A zip already on disk is used only if it is byte for byte the file CurseForge just named. Its manifest is
+        // what the version check below reads, so a stale zip of the same length would check the wrong pack.
+        if (!isFile(zip, length, sha1(latest))) {
             Http.download(URI.create(latest.get("downloadUrl").getAsString()), zip, length, sha1(latest));
         }
 
@@ -193,6 +195,10 @@ public final class Downloader {
     private static String sha1(JsonObject json) {
         var value = json.get("sha1");
         return value == null || value.isJsonNull() ? null : value.getAsString();
+    }
+
+    private static boolean isFile(Path file, long length, String sha1) throws IOException {
+        return hasLength(file, length) && (sha1 == null || Http.sha1(file).equalsIgnoreCase(sha1));
     }
 
     private static boolean hasLength(Path file, long length) throws IOException {
