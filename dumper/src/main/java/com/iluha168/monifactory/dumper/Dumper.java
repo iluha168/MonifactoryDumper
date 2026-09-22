@@ -31,7 +31,8 @@ public final class Dumper {
     static final String MODE_PROPERTY = "monifactory.dumper.mode";
     /**
      * How many recipes the sample or census draws. Default 1 for a sample and 4,000 for a census. The build renders
-     * the whole corpus unless this is set, and then only its first that many recipes.
+     * the whole corpus unless this is set, and then only its first that many recipes. For seq it is per category,
+     * default 6.
      */
     static final String COUNT_PROPERTY = "monifactory.dumper.count";
     /** The sample's or census's seed. Default 0. */
@@ -43,7 +44,9 @@ public final class Dumper {
         /** A seeded sample rendered to PNGs with a manifest, see {@link Sample}. */
         SAMPLE,
         /** The animation census over a sample, see {@link Census}. */
-        CENSUS;
+        CENSUS,
+        /** Raw frame-hash sequences of a sample, for checking the detection rules offline, see {@link Seq}. */
+        SEQ;
 
         static Mode of(String name) {
             try {
@@ -78,6 +81,7 @@ public final class Dumper {
             case DUMP -> Integer.MAX_VALUE;
             case SAMPLE -> 1;
             case CENSUS -> 4000;
+            case SEQ -> Seq.PER_CATEGORY;
         });
         long seed = Long.getLong(SEED_PROPERTY, 0L);
         if (count < 1) {

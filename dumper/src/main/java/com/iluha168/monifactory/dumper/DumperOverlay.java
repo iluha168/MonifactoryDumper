@@ -27,6 +27,11 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  */
 final class DumperOverlay extends Overlay {
     private static final long EMI_TIMEOUT = TimeUnit.MINUTES.toMillis(15);
+    /**
+     * The server datapack reload takes seconds. One boot has been seen to stop in it for good, its workers gone idle
+     * after the tags loaded, and a batch job that waits forever is worse than one that fails.
+     */
+    private static final long SERVER_RELOAD_TIMEOUT = TimeUnit.MINUTES.toMillis(10);
 
     private enum Step { BOOT, SERVER_RELOAD, JOIN, EMI, RENDER, EXIT, DONE }
 
@@ -36,7 +41,7 @@ final class DumperOverlay extends Overlay {
 
     private Step step = Step.BOOT;
     private CompletableFuture<DataPlane.Server> serverReload;
-    private long emiSince;
+    private long serverReloadSince, emiSince;
     /** The render step's work, one frame's budget per call; true once it is done. */
     private Work work;
 
@@ -79,10 +84,17 @@ final class DumperOverlay extends Overlay {
                 }
                 LOG.info("[dumper] boot reload done; starting the server datapack reload");
                 serverReload = DataPlane.startServerReload(FMLPaths.GAMEDIR.get());
+                serverReloadSince = System.currentTimeMillis();
                 return Step.SERVER_RELOAD;
             }
             case SERVER_RELOAD -> {
-                if (!serverReload.isDone()) return Step.SERVER_RELOAD;
+                if (!serverReload.isDone()) {
+                    if (System.currentTimeMillis() - serverReloadSince > SERVER_RELOAD_TIMEOUT) {
+                        throw new IllegalStateException("the server datapack reload did not finish in "
+                                + SERVER_RELOAD_TIMEOUT + " ms");
+                    }
+                    return Step.SERVER_RELOAD;
+                }
                 DataPlane.joinAndSync(minecraft, serverReload.join());
                 serverReload = null;
                 emiSince = System.currentTimeMillis();
@@ -106,6 +118,7 @@ final class DumperOverlay extends Overlay {
                     case DUMP -> Batch.start(minecraft, corpus, job.output(), job.count())::advance;
                     case SAMPLE -> Sample.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
                     case CENSUS -> Census.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
+                    case SEQ -> Seq.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
                 };
                 return Step.RENDER;
             }

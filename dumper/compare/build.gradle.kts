@@ -47,3 +47,22 @@ val compareDumps = tasks.register<JavaExec>("compareDumps") {
     // Never up to date: its inputs are directories outside the build that it is told about at the command line.
     outputs.upToDateWhen { false }
 }
+
+/**
+ * Re-checks the animation detection rules offline on identical pixels (PLAN M4), from the hash sequences one boot of
+ * `./gradlew :dumper:runGame -Pmonifactory.mode=seq` writes to dumper/build/render/seq.csv. Run it on every pack bump:
+ * `./gradlew :dumper:compare:checkDetection [-Pmonifactory.seq=<seq.csv>[,<seq.csv>...]]`.
+ */
+tasks.register<JavaExec>("checkDetection") {
+    group = "modpack"
+    description = "Checks the probe ladder and the frame policy against the full strict rule on recorded sequences."
+
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "com.iluha168.monifactory.compare.CheckDetection"
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+
+    val seq = providers.gradleProperty("monifactory.seq")
+        .orElse(project(":dumper").layout.buildDirectory.file("render/seq.csv").map { it.asFile.absolutePath })
+    argumentProviders.add(CommandLineArgumentProvider { seq.get().split(",") })
+    outputs.upToDateWhen { false }
+}

@@ -77,17 +77,6 @@ class WebpEncoderTest {
     }
 
     @Test
-    void changingSequenceWaitsForTheMuxer() {
-        Frame a = Pictures.card(168, 52, 11);
-        int[] changed = a.argb().clone();
-        changed[changed.length / 2] ^= 0x00010101;
-        Frame b = new Frame(a.width(), a.height(), changed);
-        assertThrows(UnsupportedOperationException.class, () -> encoder.encode(List.of(a, b), 50));
-        assertThrows(IllegalArgumentException.class, () -> encoder.encode(List.of(), 50));
-        assertThrows(IllegalArgumentException.class, () -> encoder.encode(List.of(a), 0));
-    }
-
-    @Test
     void convertsNativeImageLayout() {
         Frame frame = Frame.fromAbgr(2, 1, new int[]{0x80332211, 0xFFCCBBAA});
         assertArrayEquals(new int[]{0x80112233, 0xFFAABBCC}, frame.argb());
@@ -134,7 +123,7 @@ class WebpEncoderTest {
                     bad / expected.width(), expected.width(), expected.height(), expected.argb()[bad], actual.argb()[bad]));
     }
 
-    private static Frame readPam(byte[] pam) {
+    static Frame readPam(byte[] pam) {
         String text = new String(pam, StandardCharsets.ISO_8859_1);
         int body = text.indexOf("ENDHDR\n") + "ENDHDR\n".length();
         int w = 0, h = 0;

@@ -481,23 +481,37 @@ fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properti
     environment.remove("WAYLAND_DISPLAY")
 }
 
-/** What runGame makes: sample (the default), census or dump. See Dumper.Mode. */
+/** What runGame makes: sample (the default), census, seq or dump. See Dumper.Mode. */
 val runMode = providers.gradleProperty("monifactory.mode").getOrElse("sample")
 /** How many recipes runGame draws, and the seed that picks them. The mod defaults to 1 (4,000 for a census) and 0. */
 val sampleCount = providers.gradleProperty("monifactory.sample.count")
 val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
+/**
+ * Any other renderer setting, as -Pmonifactory.dumper=key=value[,key=value...], each passed on as
+ * -Dmonifactory.dumper.key=value: encoders, encodeBufferMiB, keepFramesEvery, every, checkPipeline, checkSync.
+ */
+val rendererSettings = providers.gradleProperty("monifactory.dumper").map { settings ->
+    settings.split(",").filter { it.isNotBlank() }.map {
+        val (key, value) = it.split("=", limit = 2).also { pair ->
+            if (pair.size != 2) throw GradleException("-Pmonifactory.dumper wants key=value pairs, got '$it'")
+        }
+        key.trim() to value.trim()
+    }
+}.getOrElse(emptyList())
 
 val runGame = tasks.register<Exec>("runGame") {
     group = "modpack"
     description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
 
     // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 for the M1
-    // dev-versus-production diff, or -Pmonifactory.mode=census for the animation census. The same seed picks the same
+    // dev-versus-production diff, -Pmonifactory.mode=census for the animation census, or -Pmonifactory.mode=seq for the
+    // raw hash sequences :dumper:compare:checkDetection checks the detection rules on. The same seed picks the same
     // recipes in any boot.
     bootRenderer(
         runMode,
         renderDir,
-        *listOfNotNull(sampleCount.orNull?.let { "count" to it }, sampleSeed.orNull?.let { "seed" to it }).toTypedArray(),
+        *(listOfNotNull(sampleCount.orNull?.let { "count" to it }, sampleSeed.orNull?.let { "seed" to it })
+            + rendererSettings).toTypedArray(),
     )
 }
 
@@ -539,19 +553,21 @@ val artifactDir = layout.buildDirectory.dir("dumps/version-TODO")
 
 val dump = tasks.register<Exec>("dump") {
     group = "modpack"
-    description = "Boots the pack and writes the artifact directory: recipes.json and images.pak (static recipes so far)."
+    description = "Boots the pack and writes the artifact directory: recipes.json and images.pak, stills and animations."
 
-    bootRenderer("dump", artifactDir)
+    bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
     // The artifact is a function of the renderer, the pack and the launch; the instance directory itself is not an
     // input, since the game writes logs and options into it on every boot.
     inputs.files(tasks.named("renameJar")).withPropertyName("renderer")
     inputs.files(pack.get().incoming.files).withPropertyName("pack")
     inputs.files(writeLaunchArgs).withPropertyName("launch")
+    inputs.property("settings", rendererSettings.joinToString(",") { (key, value) -> "$key=$value" })
     outputs.dir(artifactDir)
     // One boot in eight has been seen to hang in mod construction, before the renderer exists to notice. A boot is
-    // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets. The static batch
-    // then takes about three quarters of an hour, most of it waiting on the WebP encoder.
-    timeout = Duration.ofMinutes(120)
+    // about 2.5 minutes and EMI's reload half a minute; the first run also downloads 650 MB of assets. The batch is
+    // then hours: every animated recipe is drawn until its loop closes or 400 frames go by, and about half of them
+    // never close. The limit is there for a boot that never gets going, not to bound the batch.
+    timeout = Duration.ofHours(12)
 }
 
 val dumpArtifact = configurations.consumable("dumpArtifact")
