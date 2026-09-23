@@ -32,7 +32,7 @@ final class RecipeRenderer {
     }
 
     /** EMI pads a recipe screenshot by this much, in GUI pixels, around the recipe's display size. */
-    private static final int PADDING = 8;
+    static final int PADDING = 8;
 
     /**
      * Renders {@code recipe} with the clock frozen at {@code millis} and returns the image, which the caller closes.
