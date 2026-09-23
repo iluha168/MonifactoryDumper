@@ -18,7 +18,7 @@ val checkTypes = tasks.register<Exec>("checkTypes") {
 
     workingDir = layout.projectDirectory.asFile
     executable = "deno"
-    args("check")
+    args("check", "--quiet")
 }
 
 val checkFormat = tasks.register<Exec>("checkFormat") {
@@ -60,20 +60,13 @@ fun registerRun(taskName: String, configuration: String, what: String) {
         inputs.files(artifact)
         outputs.upToDateWhen { false }
 
-        val envTemplate = layout.projectDirectory.file(".env.template").asFile
-        inputs.file(envTemplate)
-
         workingDir = layout.projectDirectory.asFile
         executable = "deno"
         argumentProviders.add(CommandLineArgumentProvider {
-            val envKeys = envTemplate.readLines()
-                .filterNot { it.trimStart().startsWith("#") }
-                .map { it.substringBefore('=').trim() }
-
             listOf(
                 "run",
                 "--env-file=.env",
-                "--allow-env=${envKeys.joinToString(",")}",
+                "--allow-env",
                 "--allow-read=${artifact.singleFile.absolutePath}",
                 "--allow-net",
                 "src/index.mts",

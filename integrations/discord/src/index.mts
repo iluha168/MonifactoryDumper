@@ -1,17 +1,38 @@
+import { commandOptionsParser, createBot } from "discordeno"
 import { exit, ExitCodes } from "./cli.mts"
-import { join } from "node:path"
+import { CommandRegistry } from "./slash/lib/CommandRegistry.mts"
+import { commandHelp } from "./slash/command/help.mts"
+import { commandRecipe } from "./slash/command/recipe/index.mts"
 
-const dumpDir = Deno.args[0]
-	?? exit("No dump path specified", ExitCodes.MALFORMED_DUMP)
+const token = Deno.env.get("DISCORD_BOT_TOKEN") || exit("No discord bot token set", ExitCodes.INCORRECT_ENV)
 
-// TODO use
-const token = Deno.env.get("DISCORD_BOT_TOKEN")
-	?? exit("No discord bot token set", ExitCodes.INCORRECT_ENV)
+const commandRegistry = new CommandRegistry(
+	commandHelp,
+	commandRecipe,
+)
+export const bot = createBot({
+	events: {
+		ready() {
+			console.debug("Bot started!")
+		},
+		interactionCreate(interaction) {
+			if (!interaction.data) {
+				throw new Error("No interaction data")
+			}
+			const options = commandOptionsParser(interaction)
+			commandRegistry.handle(interaction, options, interaction.data.name)
+		},
+	},
+	token,
+	desiredProperties: {
+		interaction: {
+			id: true,
+			type: true,
+			data: true,
+			token: true,
+		},
+	},
+})
 
-const recipesFile = "recipes.json"
-const recipes: unknown[] = await Deno.readTextFile(join(dumpDir, recipesFile))
-	.catch(() => exit(recipesFile + " is not a readable file", ExitCodes.MALFORMED_DUMP))
-	.then(JSON.parse)
-	.catch(() => exit(recipesFile + " is not valid JSON", ExitCodes.MALFORMED_DUMP))
-
-console.log(`${recipes.length} recipes`)
+await bot.rest.upsertGlobalApplicationCommands(commandRegistry.payload)
+await bot.start()

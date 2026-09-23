@@ -8,5 +8,9 @@
 		"quoteProps": "consistent",
 		"operatorPosition": "nextLine",
 		"singleQuote": false
+	},
+	"imports": {
+		"discordeno": "npm:discordeno@^21.0.0",
+		"zod": "npm:zod@^4.6.5"
 	}
 }

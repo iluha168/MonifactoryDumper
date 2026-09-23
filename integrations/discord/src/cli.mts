@@ -1,6 +1,6 @@
 export const enum ExitCodes {
-	MALFORMED_DUMP = 1,
-	INCORRECT_ENV,
+	INCORRECT_ENV = 1,
+	MALFORMED_DUMP,
 }
 
 export function exit(message: string, code: ExitCodes): never {
