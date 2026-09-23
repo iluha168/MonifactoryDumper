@@ -64,6 +64,13 @@ final class Meta {
         meta.addProperty("limit", limit < corpus ? limit : null);
         meta.addProperty("failed", failed);
         meta.addProperty("images", images != null);
+        if (selection.shard() != null) {
+            // Only in a shard's own artifact, which the build merges; the merged one says "processes" instead.
+            JsonObject shard = new JsonObject();
+            shard.addProperty("index", selection.shard().index());
+            shard.addProperty("count", selection.shard().count());
+            meta.add("shard", shard);
+        }
 
         if (images != null) {
             meta.addProperty("scale", images.scale());

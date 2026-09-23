@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -72,6 +73,20 @@ final class Batch {
      * is the better size estimate; this is the sample two builds can be compared on (the rebuild check). Default 1.
      */
     static final String SAMPLE_PROPERTY = "monifactory.dumper.sample";
+    /**
+     * How many games the build runs at once ({@code -Pmonifactory.processes}), and which of them this is, from 0. Each
+     * renders the recipes whose {@link #stableKey} hashes to its index, and the build merges their artifacts. Default
+     * 1 and 0: this game renders everything.
+     */
+    static final String SHARDS_PROPERTY = "monifactory.dumper.shards";
+    static final String SHARD_PROPERTY = "monifactory.dumper.shard";
+    /**
+     * The seed of the shard hash. Not {@link #SAMPLE_PROPERTY}'s 0: under the same hash, a 1-in-50 sample split three
+     * ways would pick recipes whose hash is a multiple of 50, and those are not spread evenly over the residues of 3.
+     */
+    private static final long SHARD_SEED = 0x5AADL;
+    /** The sidecar a shard writes next to its artifact: the whole selection's keys in order, and which it owns. */
+    static final String SHARD_FILE = "shard.tsv";
 
     private static final ThreadLocal<WebpEncoder> ENCODER = ThreadLocal.withInitial(WebpEncoder::new);
 
@@ -159,19 +174,49 @@ final class Batch {
     /**
      * The recipes a run writes: the whole kept corpus, or the sample {@link #EVERY_PROPERTY} or {@link #SAMPLE_PROPERTY}
      * pick of it, or its first {@code limit} if that is fewer (a partial artifact, for trying the build out). The data
-     * mode picks the same way, so its {@code partial} means the same thing.
+     * mode picks the same way, so its {@code partial} means the same thing. {@code picked} is how many that is; a shard
+     * of the build writes only its own {@code entries} of them, see {@link Shard}.
      */
-    record Selection(List<Corpus.Entry> entries, int corpus, int every, int sample, int limit) {
+    record Selection(List<Corpus.Entry> entries, int picked, int corpus, int every, int sample, int limit,
+                     Shard shard) {
         /** A sample or a capped run is a partial artifact. It is valid, but it is not the pack. */
         boolean partial() {
-            return every > 1 || sample > 1 || entries.size() < corpus;
+            return every > 1 || sample > 1 || picked < corpus;
+        }
+    }
+
+    /**
+     * One game's part of a build that runs several: the stable key of every recipe the selection picked, in corpus
+     * order, and which of them this game renders. The merge orders the shards' records by these lists, and they are
+     * what it tells drift by: EMI's list differs by a few dozen recipes from boot to boot, so the shards' lists differ
+     * too.
+     */
+    record Shard(int index, int count, List<String> keys, BitSet owned) {
+        /** {@link #SHARD_FILE}: {@code record} (the line in this shard's recipes.json, blank if not its) and {@code key}. */
+        void write(Path file) throws IOException {
+            try (BufferedWriter out = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                out.write("record\tkey\n");
+                for (int i = 0, record = 0; i < keys.size(); i++) {
+                    out.write((owned.get(i) ? Integer.toString(record++) : "") + "\t" + keys.get(i) + "\n");
+                }
+            }
         }
     }
 
     static Selection select(Corpus corpus, int limit) {
         List<Corpus.Entry> entries = corpus.kept;
+        int shards = Integer.getInteger(SHARDS_PROPERTY, 1), shard = Integer.getInteger(SHARD_PROPERTY, 0);
+        if (shards < 1 || shard < 0 || shard >= shards) {
+            throw new IllegalArgumentException(SHARD_PROPERTY + "=" + shard + " of " + SHARDS_PROPERTY + "=" + shards);
+        }
         int every = Integer.getInteger(EVERY_PROPERTY, 1);
         if (every < 1) throw new IllegalArgumentException(EVERY_PROPERTY + " must be at least 1, not " + every);
+        if (every > 1 && shards > 1) {
+            // Every Nth by position in each game's own list, and the lists drift: past the first recipe one boot has
+            // and another has not, the games would be counting from different starts.
+            throw new IllegalArgumentException(EVERY_PROPERTY + " picks by position, which differs between the "
+                    + shards + " games of a sharded build; use " + SAMPLE_PROPERTY);
+        }
         if (every > 1) {
             List<Corpus.Entry> sample = new ArrayList<>(entries.size() / every + 1);
             for (int i = 0; i < entries.size(); i += every) sample.add(entries.get(i));
@@ -195,7 +240,24 @@ final class Batch {
                     entries.size());
             entries = entries.subList(0, limit);
         }
-        return new Selection(entries, corpus.kept.size(), every, sample, limit);
+        int picked = entries.size();
+        if (shards == 1) return new Selection(entries, picked, corpus.kept.size(), every, sample, limit, null);
+
+        // After the sample and the limit, so that the shards together render what one game would have.
+        List<String> keys = new ArrayList<>(picked);
+        BitSet owned = new BitSet(picked);
+        List<Corpus.Entry> mine = new ArrayList<>(picked / shards + 1);
+        for (int i = 0; i < picked; i++) {
+            String key = stableKey(entries.get(i));
+            keys.add(key);
+            if (Long.remainderUnsigned(Sample.score(SHARD_SEED, key), shards) == shard) {
+                owned.set(i);
+                mine.add(entries.get(i));
+            }
+        }
+        LOG.info("[dumper] shard {} of {}: {} of the {} recipes picked", shard, shards, mine.size(), picked);
+        return new Selection(mine, picked, corpus.kept.size(), every, sample, limit,
+                new Shard(shard, shards, keys, owned));
     }
 
     /** Starts the build over {@link #select}'s recipes. */
@@ -203,9 +265,14 @@ final class Batch {
         Files.createDirectories(output);
         corpus.writeCategories(output.resolve("categories.tsv"));
         Selection selection = select(corpus, limit);
+        // Alone, every core but the render thread's and one to spare encodes. Several games share the rest: each has a
+        // render thread of its own, and an encoder too many takes time from some game's render thread, which is the
+        // slowest part of the build. Two matte threads are enough for a collect's one or two big tiles.
         int cores = Runtime.getRuntime().availableProcessors();
-        int encoderThreads = Integer.getInteger(ENCODERS_PROPERTY, Math.max(1, cores - 2));
+        int shards = selection.shard() == null ? 1 : selection.shard().count();
+        int encoderThreads = Integer.getInteger(ENCODERS_PROPERTY, Math.max(1, (cores - 1 - shards) / shards));
         int matteThreads = Math.max(1, Math.min(4, cores / 3));
+        if (shards > 1) matteThreads = Math.min(2, matteThreads);
         long buffer = Long.getLong(BUFFER_PROPERTY, 1024L) << 20;
         LOG.info("[dumper] batch: {} recipes as layers, checked against the real render at frame 0, every {}th"
                         + " sequence frame and the last; loops up to {} frames (trim to {}); {} encoder threads,"
@@ -374,6 +441,7 @@ final class Batch {
 
         writeRenderTsv(output.resolve("render.tsv"));
         RecipeJson.writeFile(entries, images, output.resolve("recipes.json"));
+        if (selection.shard() != null) selection.shard().write(output.resolve(SHARD_FILE));
         // Last: a directory with meta.json in it is finished.
         Meta.write(output.resolve("meta.json"), pack, selection, failed,
                 new Meta.Images(RecipeRenderer.scale(minecraft), table.size(), table.bytes(), layered, fallback));
