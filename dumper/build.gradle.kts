@@ -71,6 +71,8 @@ object GameMemory {
     /** Resident beyond the heap while a game renders, and at its boot's peak. */
     const val RENDER_OVERHEAD_MIB = 2560L
     const val BOOT_OVERHEAD_MIB = 3072L
+    /** Room left for everything else the machine runs while the games do. */
+    const val HEADROOM_MIB = 2048L
 
     /** An -Xmx size in MiB, or null if it is not one this understands. */
     fun mib(size: String): Long? {
@@ -988,6 +990,11 @@ abstract class JarJarMetadata : DefaultTask() {
  * unpacking the same file at once could load a half-written one. The game's assets, libraries and Forge install are
  * read only.
  *
+ * The games start one after another, not together. Game k+1 starts once game k logs that the renderer released the
+ * server side ([RELEASED]), about two minutes into its boot: the boot's memory peak (the datapack reload and EMI's
+ * reload) comes before that line, so no two games are ever at their peak at once. A game that fails or hangs before the
+ * line holds the next one back only until it exits or [SILENCE] runs out.
+ *
  * A game that fails is started once more, on its own, while the others carry on; a second failure fails the build.
  * Failing is: a non-zero exit (1 for the renderer's own failures, such as the server datapack reload that hangs about
  * one boot in eight; 143 or 137 when an out-of-memory killer took it), an exit without a finished artifact, or
@@ -1042,6 +1049,9 @@ abstract class ShardedGames : DefaultTask() {
         private val OWN = setOf("logs")
         /** The artifact files a game writes, meta.json last. */
         private val FILES = listOf("recipes.json", "stills.pak", "stills.json", "render.tsv", "shard.tsv", "meta.json")
+        /** ServerLeftovers.MARKER in the renderer, which logs it once the boot's memory peak is over. */
+        const val RELEASED = "[dumper] released the server side"
+        private val RELEASED_HEAP = Regex("""heap (\d+) MiB used after GC""")
     }
 
     private inner class Game(val index: Int, val instance: File, val args: File, val artifact: File) {
@@ -1054,14 +1064,26 @@ abstract class ShardedGames : DefaultTask() {
         var lastChange = 0L
         var started = 0L
         var done = false
+        /** Waiting for its turn to start: at first, and again after a first failure. */
+        var pending = true
+        /** Whether this attempt has logged [RELEASED], and how far into its output the search for it got. */
+        var released = false
+        private var scanned = 0L
+        private var tail = ""
         val failures = mutableListOf<String>()
 
         val running get() = process != null
+        /** Started and not yet past its boot's memory peak. The next game waits while one is. */
+        val booting get() = running && !released
         /** Failed twice: the build fails whatever the other games do. */
         val lost get() = !done && process == null && failures.size >= 2
 
         fun start() {
             attempt++
+            pending = false
+            released = false
+            scanned = 0L
+            tail = ""
             killed = null
             artifact.deleteRecursively()
             val log = shards.get().asFile.resolve("$index-attempt$attempt.out")
@@ -1097,6 +1119,7 @@ abstract class ShardedGames : DefaultTask() {
                 if (size != lastSize) {
                     lastSize = size
                     lastChange = now
+                    if (!released) scanForRelease(now)
                 } else if (killed == null && now - lastChange > SILENCE.toNanos()) {
                     killed = "wrote nothing for ${SILENCE.toMinutes()} minutes"
                     logger.warn("game $index $killed; stopping it")
@@ -1124,9 +1147,34 @@ abstract class ShardedGames : DefaultTask() {
             if (latest.isFile) latest.copyTo(saved, overwrite = true)
             failures += "game $index, attempt $attempt, $reason after $minutes min: see $saved"
             if (attempt < 2) {
-                logger.warn("game $index $reason after $minutes min; its log is $saved. Starting it again.")
-                start()
+                logger.warn("game $index $reason after $minutes min; its log is $saved. It starts again once no "
+                    + "other game is booting.")
+                pending = true
             }
+        }
+
+        /** Reads what the game wrote since the last look for [RELEASED]. A line may be split between two looks. */
+        private fun scanForRelease(now: Long) {
+            val log = log ?: return
+            val text = RandomAccessFile(log, "r").use { file ->
+                val end = file.length()
+                if (end <= scanned) return
+                val bytes = ByteArray((end - scanned).toInt())
+                file.seek(scanned)
+                file.readFully(bytes)
+                scanned = end
+                // The marker is ASCII, and Latin-1 never fails on a multi-byte character cut in half.
+                tail + String(bytes, Charsets.ISO_8859_1)
+            }
+            val at = text.indexOf(RELEASED)
+            if (at < 0) {
+                tail = text.takeLast(RELEASED.length + 64)
+                return
+            }
+            released = true
+            val heap = RELEASED_HEAP.find(text, at)?.groupValues?.get(1)?.let { ", heap $it MiB after GC" } ?: ""
+            logger.lifecycle("game $index: released the server side ${(now - started) / 1_000_000_000L} s after "
+                + "it started$heap; its boot is over")
         }
 
         fun kill() {
@@ -1185,20 +1233,25 @@ abstract class ShardedGames : DefaultTask() {
             }
         }
 
-        logger.lifecycle("running $n games at once, -Xmx${heap.get()} each; game 0 in $source, the others in "
-            + "${instances.get().asFile}; their artifacts go to $root")
+        logger.lifecycle("running $n games, -Xmx${heap.get()} each, each started once the one before it is past its "
+            + "boot; game 0 in $source, the others in ${instances.get().asFile}; their artifacts go to $root")
         try {
-            games.forEach { it.start() }
             var lastProgress = System.nanoTime()
             // A game that failed twice fails the build, so the others stop then rather than hours later.
-            while (games.any { it.running } && games.none { it.lost }) {
+            while (games.any { it.running || it.pending } && games.none { it.lost }) {
+                // One boot at a time, a retry included.
+                if (games.none { it.booting }) games.firstOrNull { it.pending }?.start()
                 Thread.sleep(2000)
                 val now = System.nanoTime()
                 games.forEach { it.poll(now) }
                 if (now - lastProgress > PROGRESS.toNanos()) {
                     lastProgress = now
-                    games.filter { it.running }.forEach { game ->
-                        logger.lifecycle("game ${game.index}: ${game.lastDumperLine() ?: "booting"}")
+                    games.forEach { game ->
+                        when {
+                            game.running ->
+                                logger.lifecycle("game ${game.index}: ${game.lastDumperLine() ?: "booting"}")
+                            game.pending -> logger.lifecycle("game ${game.index}: waiting for a boot to finish")
+                        }
                     }
                 }
             }
@@ -1211,7 +1264,7 @@ abstract class ShardedGames : DefaultTask() {
         if (lost.isNotEmpty()) {
             val stopped = games.filter { !it.done && !it.lost }.map { it.index }
             throw GradleException("${lost.size} of $n games failed twice"
-                + (if (stopped.isEmpty()) "" else ", so games $stopped were stopped") + ":\n  "
+                + (if (stopped.isEmpty()) "" else ", so games $stopped were stopped or never started") + ":\n  "
                 + lost.flatMap { it.failures }.joinToString("\n  "))
         }
         games.filter { it.failures.isNotEmpty() }.forEach { game ->
@@ -1265,10 +1318,11 @@ abstract class ShardedGames : DefaultTask() {
     }
 
     /**
-     * Warns when the games may not fit in memory. One game's resident size has been its heap plus about 2 to 3 GB (5.8
-     * to 6.5 GB at -Xmx4G, 7 to 8 GB at -Xmx5G). What happens when they do not fit was seen on a laptop with 10 GB
-     * free: without swap, earlyoom killed the games (exit 143) within minutes; with swap, both games slowed to a crawl
-     * and the NVIDIA driver failed to map GPU memory, which left the GPU needing a reboot.
+     * Warns when the games may not fit in memory: all but one of them rendering and one at its boot's peak, which is
+     * the most the staggered start lets happen at once ([GameMemory]: about 7.5 and 8 GB at -Xmx5G), and 2 GB to spare. What happens when
+     * they do not fit was seen on a laptop with 10 GB free: without swap, earlyoom killed the games (exit 143) within
+     * minutes; with swap, both games slowed to a crawl and the NVIDIA driver failed to map GPU memory, which left the
+     * GPU needing a reboot.
      */
     private fun warnAboutMemory(n: Int) {
         val meminfo = File("/proc/meminfo")
@@ -1276,18 +1330,18 @@ abstract class ShardedGames : DefaultTask() {
         fun kib(key: String) = meminfo.readLines().firstOrNull { it.startsWith("$key:") }
             ?.let { Regex("""\d+""").find(it)?.value?.toLong() }
         val total = kib("MemTotal") ?: return
-        val available = kib("MemAvailable") ?: total
-        val match = Regex("""(\d+)([kKmMgGtT]?)""").matchEntire(heap.get().trim()) ?: return
-        val unit = when (match.groupValues[2].lowercase()) {
-            "k" -> 1L; "m" -> 1L shl 10; "g" -> 1L shl 20; "t" -> 1L shl 30; else -> 0L
-        }
-        val heapKib = if (unit == 0L) match.groupValues[1].toLong() / 1024 else match.groupValues[1].toLong() * unit
-        val needed = n * (heapKib + (3L shl 20))
+        val available = (kib("MemAvailable") ?: total) shr 10
+        val heapMib = GameMemory.mib(heap.get()) ?: return
+        val rendering = heapMib + GameMemory.RENDER_OVERHEAD_MIB
+        val booting = heapMib + GameMemory.BOOT_OVERHEAD_MIB
+        val needed = (n - 1) * rendering + booting + GameMemory.HEADROOM_MIB
         if (needed > available) {
-            logger.warn("$n games at -Xmx${heap.get()} want about ${needed shr 20} GB (heap plus about 3 GB each), "
-                + "and ${available shr 20} of this machine's ${total shr 20} GB are available. An out-of-memory "
-                + "killer may take a game, and swapping them has taken the GPU driver down with it; close programs, "
-                + "or use a smaller -Pmonifactory.processes.")
+            logger.warn("$n games at -Xmx${heap.get()} want about %.1f GB (%.1f GB each rendering, one of them at its "
+                .format(needed / 1024.0, rendering / 1024.0)
+                + "boot's peak of %.1f GB, and 2 GB to spare), and %.1f of this machine's %.1f GB are available. "
+                .format(booting / 1024.0, available / 1024.0, (total shr 10) / 1024.0)
+                + "An out-of-memory killer may take a game, and swapping them has taken the GPU driver down with it; "
+                + "close programs, or use a smaller -Pmonifactory.processes.")
         }
     }
 }
