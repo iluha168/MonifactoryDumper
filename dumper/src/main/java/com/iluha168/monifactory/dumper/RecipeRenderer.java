@@ -1,6 +1,5 @@
 package com.iluha168.monifactory.dumper;
 
-import com.iluha168.monifactory.faketime.FakeTime;
 import com.iluha168.monifactory.imgencoder.Frame;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
@@ -35,7 +34,7 @@ final class RecipeRenderer {
     static final int PADDING = 8;
 
     /**
-     * Renders {@code recipe} with the clock frozen at {@code millis} and returns the image, which the caller closes.
+     * Renders {@code recipe} at {@code millis} (see {@link DrawTime}) and returns the image, which the caller closes.
      * The size is {@code (displayWidth + 8) * scale} by {@code (displayHeight + 8) * scale}.
      */
     static NativeImage render(Minecraft minecraft, EmiRecipe recipe, long millis) {
@@ -181,10 +180,6 @@ final class RecipeRenderer {
         }
     }
 
-    /**
-     * Draws {@code recipe} into a target of its size and returns the target, still holding the frame. Targets of one
-     * size are told apart by {@code variant}, so {@link Pipeline} can draw into one while the other is being copied.
-     */
     /** Pixels per GUI pixel, EMI's screenshot scale. 0 in its config means the window's GUI scale, headless 2. */
     static int scale(Minecraft minecraft) {
         return EmiConfig.recipeScreenshotScale < 1
@@ -192,6 +187,14 @@ final class RecipeRenderer {
                 : EmiConfig.recipeScreenshotScale;
     }
 
+    /**
+     * Draws {@code recipe} into a target of its size and returns the target, still holding the frame. Targets of one
+     * size are told apart by {@code variant}, so {@link Pipeline} can draw into one while the other is being copied.
+     * <p>
+     * The draw runs under {@link DrawTime}: the clock frozen at {@code millis} and the player's tick stood from it,
+     * the same as every layer the layered renderer compares with this picture. With the clock alone, LDLib's widgets
+     * would refresh at whatever real tick the player had reached, not at the frozen one.
+     */
     private static RenderTarget drawTo(Minecraft minecraft, EmiRecipe recipe, long millis, int variant) {
         int width = recipe.getDisplayWidth() + PADDING;
         int height = recipe.getDisplayHeight() + PADDING;
@@ -207,9 +210,8 @@ final class RecipeRenderer {
         PoseStack view = RenderSystem.getModelViewStack();
         Matrix4f projection = RenderSystem.getProjectionMatrix();
         view.pushPose();
-        FakeTime.freeze(millis);
         // One recipe that throws must not leave the model-view stack, the projection or the clock behind for
-        // every recipe after it.
+        // every recipe after it. DrawTime puts the clock and the tick back on its own.
         try {
             view.setIdentity();
             view.translate(-1.0, 1.0, 0.0);
@@ -218,11 +220,12 @@ final class RecipeRenderer {
             RenderSystem.applyModelViewMatrix();
             RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorting.ORTHOGRAPHIC_Z);
 
-            GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
-            EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
-            graphics.flush();
+            DrawTime.run(minecraft, millis, () -> {
+                GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
+                EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
+                graphics.flush();
+            });
         } finally {
-            FakeTime.release();
             RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);
             view.popPose();
             RenderSystem.applyModelViewMatrix();

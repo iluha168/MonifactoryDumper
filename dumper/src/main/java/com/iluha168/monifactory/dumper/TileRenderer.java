@@ -12,21 +12,27 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL15;
+import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL21;
 import org.lwjgl.opengl.GL30;
+import org.lwjgl.system.MemoryStack;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Draws a recipe's layers as tiles of one offscreen target and hands back each layer's straight-alpha picture
@@ -34,25 +40,34 @@ import java.util.function.Consumer;
  * <p>
  * A tile is a crop box of the recipe's canvas and something that draws. It is drawn twice, over opaque black and over
  * opaque white, each into its own region of the target: the box plus a 1-pixel guard ring on every side, cleared on
- * its own, with the viewport on the region and a transform that maps exactly that part of the canvas onto it. What a
- * draw puts outside the region the viewport clips, so tiles cannot spill into each other, and what lands on the ring
- * is how {@link Matte} tells that a layer escaped its box. Tiles are shelf-packed ({@link TilePacking}) into
- * power-of-two targets up to {@value #MAX_SIDE} square, several passes when they don't fit one, and each pass is read
- * back once, only the rectangle it used.
+ * its own. What lands on the ring is how {@link Matte} tells that a layer escaped its box. Tiles are shelf-packed
+ * ({@link TilePacking}) into power-of-two targets up to {@value #MAX_SIDE} square, several passes when they don't fit
+ * one, and each pass is read back once, only the rectangle it used.
+ * <p>
+ * Each draw goes to a scratch target the size of the canvas, with exactly the target size, viewport and transform
+ * {@link RecipeRenderer} draws the whole recipe with, and then its box and ring are copied to the tile's region. So
+ * every vertex is computed by the same arithmetic as in the real render and lands on the same pixel. Mapping only the
+ * box onto a region-sized viewport, or moving a canvas-sized viewport onto the region, both round differently in the
+ * last bits, and that flipped single pixels where an edge runs exactly through a pixel's centre, as the corners of a
+ * block item drawn in 3D do: one pixel off in about one recipe in thirty. The ring outside the canvas is outside the
+ * scratch target too, clipped as the real render clips it, and holds the clear colour. And since a region is copied
+ * right after its own draw and cleared before it, a layer that turns the scissor off or moves the viewport can only
+ * spoil its own picture, which the check against the real render then catches, never another tile's.
  * <p>
  * The readback goes into a pixel buffer object, so {@link #submit} returns once the GL has the copy queued, and the
  * pixels are only waited for in {@link Submission#collect}. Two buffers take turns: the caller can submit the next
  * batch before collecting this one, and the GPU finishes one while the render thread draws the other. Collecting maps
- * the buffer and runs the alpha solve, the ring check and the hash per tile on the caller's executor, straight out of
- * the mapped memory. The pixels never pass through a Java array: {@code glReadPixels} into one held a JNI critical
- * section through the whole GPU wait while other threads allocated, and sync plus readback cost ten times as much
- * (REPORT 8, trap 3).
+ * the buffer and runs the alpha solve, the ring check and the hash per tile straight out of the mapped memory: big
+ * tiles on the caller's executor, small ones on the render thread meanwhile. The pixels never pass through a Java
+ * array: {@code glReadPixels} into one held a JNI critical section through the whole GPU wait while other threads
+ * allocated, and sync plus readback cost ten times as much (REPORT 8, trap 3).
  * <p>
  * Ordering. Submissions alternate between the two buffers, so submission N's buffer is written again by submission
  * N + 2. Collect N before submitting N + 2; a submission overwritten first throws when collected. Collect each
  * submission once. What {@code collect} returns is the caller's: the buffer is unmapped before it returns, and nothing
- * in the results points into it, so they stay valid through any later submit. Everything here is render thread only, {@code collect} included, since it maps and unmaps a GL
- * buffer; only the per-tile work runs on the executor, and {@code collect} returns when all of it has.
+ * in the results points into it, so they stay valid through any later submit. Everything here is render thread only,
+ * {@code collect} included, since it maps and unmaps a GL buffer; only the per-tile work runs on the executor, and
+ * {@code collect} returns when all of it has.
  * <p>
  * Time. Nothing here freezes the clock or stands the player's tick. The caller wraps {@link #submit} in
  * {@link DrawTime} at the plan's {@link LayerPlan#millis()} (DESIGN 3.3): every draw of the batch, flushes included,
@@ -71,6 +86,8 @@ final class TileRenderer implements AutoCloseable {
      * one the other turn's readback may still be copying out of.
      */
     private static final int TARGETS = 8;
+    /** Tiles at least this many pixels, ring included, are solved on the executor; smaller ones on the caller. */
+    private static final int POOL_PIXELS = 16_384;
 
     /**
      * Wraps a tile's draw over black, the one the caller watches: it must run {@code draw} exactly once. The draw
@@ -170,8 +187,9 @@ final class TileRenderer implements AutoCloseable {
         long bytes = 4 * ints;
         if (bytes > Integer.MAX_VALUE) throw new IllegalArgumentException("a " + bytes + "-byte readback is too large");
 
+        BlendDepth baseline = BlendDepth.read();
         for (int p = 0; p < passOffsets.length; p++) {
-            drawPass(plan, tiles, layout, p, slot, passOffsets[p], bytes);
+            drawPass(plan, tiles, layout, p, slot, passOffsets[p], bytes, baseline);
         }
         turn ^= 1;
         int[] black = new int[n], stride = new int[n];
@@ -187,16 +205,21 @@ final class TileRenderer implements AutoCloseable {
         return submission;
     }
 
-    /** Draws pass {@code p}'s tiles into its target and reads the used rectangle into buffer {@code slot}. */
+    /**
+     * Draws pass {@code p}'s tiles into its target and reads the used rectangle into buffer {@code slot}: every black
+     * draw in submission order, then every white one, each run starting from {@code baseline}. So a layer's two draws
+     * both start from the state the layer before it left, as its one draw in the real render does, and nothing has to
+     * be put back between them.
+     */
     private void drawPass(LayerPlan plan, List<Tile> tiles, TilePacking.Layout layout, int p, int slot, int offset,
-                          long bytes) {
+                          long bytes, BlendDepth baseline) {
         TilePacking.Pass pass = layout.passes().get(p);
         RenderTarget target = targets.computeIfAbsent(
                 (long) slot << 62 | (long) pass.targetWidth() << 31 | pass.targetHeight(),
                 key -> new TextureTarget(pass.targetWidth(), pass.targetHeight(), true, Minecraft.ON_OSX));
-        target.bindWrite(true);
+        RenderTarget canvas = targets.computeIfAbsent(2L << 62 | (long) plan.width() << 31 | plan.height(),
+                key -> new TextureTarget(plan.width(), plan.height(), true, Minecraft.ON_OSX));
 
-        float scale = plan.scale();
         PoseStack view = RenderSystem.getModelViewStack();
         Matrix4f projection = RenderSystem.getProjectionMatrix();
         view.pushPose();
@@ -204,17 +227,20 @@ final class TileRenderer implements AutoCloseable {
         // behind for every draw after it.
         try {
             RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorting.ORTHOGRAPHIC_Z);
-            for (int i = 0; i < tiles.size(); i++) {
-                TilePacking.Place place = layout.places().get(i);
-                if (place.pass() != p) continue;
-                Tile tile = tiles.get(i);
-                int w = tile.box().width() + 2 * RING;
-                Runnable black = () -> drawTile(target, tile, scale, place.x(), place.y(), 0f);
-                if (tile.black() == null) black.run();
-                else tile.black().around(black);
-                drawTile(target, tile, scale, place.x() + w, place.y(), 1f);
+            for (int white = 0; white < 2; white++) {
+                baseline.apply();
+                for (int i = 0; i < tiles.size(); i++) {
+                    TilePacking.Place place = layout.places().get(i);
+                    if (place.pass() != p) continue;
+                    Tile tile = tiles.get(i);
+                    int x = place.x() + white * (tile.box().width() + 2 * RING);
+                    float grey = white;
+                    Runnable draw = () -> drawTile(canvas, target, plan, tile, x, place.y(), grey);
+                    if (white == 1 || tile.black() == null) draw.run();
+                    else tile.black().around(draw);
+                }
             }
-            // A layer may have bound another framebuffer on its way; the readback is of this one.
+            // The readback is of the pass's target, whatever a layer bound last.
             target.bindWrite(false);
             GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, buffer(slot, bytes));
             GlStateManager._pixelStore(GL11.GL_PACK_ALIGNMENT, 4);
@@ -235,37 +261,123 @@ final class TileRenderer implements AutoCloseable {
     }
 
     /**
-     * One draw of {@code tile} into its region at ({@code x}, {@code y}) from the target's bottom left, over grey
-     * level {@code clear}. Everything a layer could have changed on its way is set again, per draw: the framebuffer
-     * (a layer may bind its own and leave it bound), the viewport and the model-view.
+     * One draw of {@code tile} over grey level {@code grey}: into {@code canvas}, a target the size of the recipe's
+     * canvas, exactly as {@link RecipeRenderer} draws the whole recipe, then its box and ring copied to the region at
+     * ({@code x}, {@code y}) from {@code atlas}'s bottom left. Everything a layer could have changed on its way is set
+     * again, per draw: the framebuffer, the viewport, the scissor and the model-view.
      */
-    private void drawTile(RenderTarget target, Tile tile, float scale, int x, int y, float clear) {
+    private void drawTile(RenderTarget canvas, RenderTarget atlas, LayerPlan plan, Tile tile, int x, int y,
+                          float grey) {
         LayerPlan.Box box = tile.box();
         int w = box.width() + 2 * RING, h = box.height() + 2 * RING;
-        target.bindWrite(false);
-        RenderSystem.viewport(x, y, w, h);
-        RenderSystem.enableScissor(x, y, w, h);
-        RenderSystem.clearColor(clear, clear, clear, 1f);
-        RenderSystem.clearDepth(1.0);
-        RenderSystem.clear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT, Minecraft.ON_OSX);
-        RenderSystem.disableScissor();
+        // The region on the canvas, ring included, in GL's rows from the bottom; and the part of it on the canvas.
+        int left = box.x() - RING, bottom = plan.height() - box.y() - box.height() - RING;
+        int x0 = Math.max(0, left), y0 = Math.max(0, bottom);
+        int x1 = Math.min(plan.width(), left + w), y1 = Math.min(plan.height(), bottom + h);
+        if (x0 > left || y0 > bottom || x1 < left + w || y1 < bottom + h) {
+            // The ring runs off the canvas, where nothing is drawn or copied: it has to hold the clear colour.
+            atlas.bindWrite(false);
+            clear(x, y, w, h, grey, false);
+        }
 
-        // RecipeRenderer.drawTo maps the canvas, GUI (0, 0) to (guiWidth, guiHeight), onto the whole viewport. This
-        // maps the tile's part of it, ring included, the same way: the same pixels per GUI pixel, moved so the tile's
-        // corner lands on the viewport's. Boxes are whole pixels, so every vertex lands where it does on the canvas,
-        // shifted by whole pixels.
-        float left = (box.x() - RING) / scale, top = (box.y() - RING) / scale;
+        canvas.bindWrite(false);
+        RenderSystem.viewport(0, 0, plan.width(), plan.height());
+        clear(x0, y0, x1 - x0, y1 - y0, grey, true);
         PoseStack view = RenderSystem.getModelViewStack();
         view.setIdentity();
-        view.translate(-1.0f, 1.0f, 0.0f);
-        view.scale(2f * scale / w, -2f * scale / h, -1f / 1000f);
-        view.translate(-left, -top, 10.0f);
+        view.translate(-1.0, 1.0, 0.0);
+        view.scale(2f / plan.guiWidth(), -2f / plan.guiHeight(), -1f / 1000f);
+        view.translate(0.0, 0.0, 10.0);
         RenderSystem.applyModelViewMatrix();
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
-
         GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
         tile.body().accept(graphics);
         graphics.flush();
+
+        // A blit is clipped by the scissor, and a layer may have left one on.
+        RenderSystem.disableScissor();
+        GlStateManager._glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, canvas.frameBufferId);
+        GlStateManager._glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, atlas.frameBufferId);
+        withMasks(() -> GlStateManager._glBlitFrameBuffer(x0, y0, x1, y1, x + x0 - left, y + y0 - bottom,
+                x + x1 - left, y + y1 - bottom, GL11.GL_COLOR_BUFFER_BIT, GL11.GL_NEAREST));
+        GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+    }
+
+    /** Clears a rectangle of the bound framebuffer to {@code grey}, alpha 1, and depth to 1 if {@code depth}. */
+    private static void clear(int x, int y, int w, int h, float grey, boolean depth) {
+        RenderSystem.enableScissor(x, y, w, h);
+        RenderSystem.clearColor(grey, grey, grey, 1f);
+        RenderSystem.clearDepth(1.0);
+        withMasks(() -> RenderSystem.clear(GL11.GL_COLOR_BUFFER_BIT | (depth ? GL11.GL_DEPTH_BUFFER_BIT : 0),
+                Minecraft.ON_OSX));
+        RenderSystem.disableScissor();
+    }
+
+    /**
+     * Runs {@code body}, a clear or a copy, with every colour channel and depth writable, as it needs, then puts back
+     * the masks a layer left, which the next layer's draw starts from.
+     */
+    private static void withMasks(Runnable body) {
+        boolean[] colour = new boolean[4];
+        boolean depth;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            ByteBuffer mask = stack.malloc(4);
+            GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, mask);
+            for (int c = 0; c < 4; c++) colour[c] = mask.get(c) != 0;
+            GL11.glGetBooleanv(GL11.GL_DEPTH_WRITEMASK, mask);
+            depth = mask.get(0) != 0;
+        }
+        boolean all = colour[0] && colour[1] && colour[2] && colour[3];
+        if (!all) RenderSystem.colorMask(true, true, true, true);
+        if (!depth) RenderSystem.depthMask(true);
+        body.run();
+        if (!all) RenderSystem.colorMask(colour[0], colour[1], colour[2], colour[3]);
+        if (!depth) RenderSystem.depthMask(false);
+    }
+
+    /**
+     * The GL state a layer's draw blends and tests with: blending, its functions and equation, the depth test, depth
+     * writes and function, face culling and the colour mask. Read from the GL, set back through {@link RenderSystem}
+     * so its cache agrees.
+     */
+    private record BlendDepth(boolean blend, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, int equation,
+                              boolean depthTest, boolean depthMask, int depthFunc, boolean cull, int colorMask) {
+        static BlendDepth read() {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                IntBuffer one = stack.mallocInt(1);
+                ByteBuffer mask = stack.malloc(4);
+                GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, mask);
+                int colorMask = (mask.get(0) != 0 ? 8 : 0) | (mask.get(1) != 0 ? 4 : 0) | (mask.get(2) != 0 ? 2 : 0)
+                        | (mask.get(3) != 0 ? 1 : 0);
+                GL11.glGetBooleanv(GL11.GL_DEPTH_WRITEMASK, mask);
+                boolean depthMask = mask.get(0) != 0;
+                return new BlendDepth(GL11.glIsEnabled(GL11.GL_BLEND), integer(GL14.GL_BLEND_SRC_RGB, one),
+                        integer(GL14.GL_BLEND_DST_RGB, one), integer(GL14.GL_BLEND_SRC_ALPHA, one),
+                        integer(GL14.GL_BLEND_DST_ALPHA, one), integer(GL20.GL_BLEND_EQUATION_RGB, one),
+                        GL11.glIsEnabled(GL11.GL_DEPTH_TEST), depthMask, integer(GL11.GL_DEPTH_FUNC, one),
+                        GL11.glIsEnabled(GL11.GL_CULL_FACE), colorMask);
+            }
+        }
+
+        private static int integer(int name, IntBuffer into) {
+            GL11.glGetIntegerv(name, into);
+            return into.get(0);
+        }
+
+        void apply() {
+            if (blend) RenderSystem.enableBlend();
+            else RenderSystem.disableBlend();
+            RenderSystem.blendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+            RenderSystem.blendEquation(equation);
+            if (depthTest) RenderSystem.enableDepthTest();
+            else RenderSystem.disableDepthTest();
+            RenderSystem.depthMask(depthMask);
+            RenderSystem.depthFunc(depthFunc);
+            if (cull) RenderSystem.enableCull();
+            else RenderSystem.disableCull();
+            RenderSystem.colorMask((colorMask & 8) != 0, (colorMask & 4) != 0, (colorMask & 2) != 0,
+                    (colorMask & 1) != 0);
+        }
     }
 
     /** Buffer {@code slot}, made or grown to hold {@code bytes}. */
@@ -325,19 +437,34 @@ final class TileRenderer implements AutoCloseable {
                 throw new IllegalStateException("glMapBufferRange returned nothing");
             }
             IntBuffer pixels = mapped.order(ByteOrder.nativeOrder()).asIntBuffer();
-            List<CompletableFuture<Matted>> work = new ArrayList<>(tiles.size());
+            List<CompletableFuture<Matted>> work = new ArrayList<>(Collections.nCopies(tiles.size(), null));
             try {
-                for (int i = 0; i < tiles.size(); i++) {
-                    LayerPlan.Box box = tiles.get(i).box();
-                    int from = black[i], rowStride = stride[i];
-                    int w = box.width() + 2 * RING, h = box.height() + 2 * RING;
-                    work.add(CompletableFuture.supplyAsync(() -> {
-                        Matte.Result result = Matte.solve(pixels, from, from + w, rowStride, w, h);
-                        return new Matted(result.still(), result.escaped(), result.alphaSpread(),
-                                StillHash.of(result.still()));
-                    }, executor));
+                // Big tiles go to the pool first; the render thread does the small ones meanwhile. Handing a tile of a
+                // few thousand pixels to a sleeping thread costs more than solving it.
+                for (int small = 0; small < 2; small++) {
+                    for (int i = 0; i < tiles.size(); i++) {
+                        LayerPlan.Box box = tiles.get(i).box();
+                        int from = black[i], rowStride = stride[i];
+                        int w = box.width() + 2 * RING, h = box.height() + 2 * RING;
+                        if ((w * h < POOL_PIXELS) != (small == 1)) continue;
+                        Supplier<Matted> solve = () -> {
+                            Matte.Result result = Matte.solve(pixels, from, from + w, rowStride, w, h);
+                            return new Matted(result.still(), result.escaped(), result.alphaSpread(),
+                                    StillHash.of(result.still()));
+                        };
+                        if (small == 0) {
+                            work.set(i, CompletableFuture.supplyAsync(solve, executor));
+                            continue;
+                        }
+                        try {
+                            work.set(i, CompletableFuture.completedFuture(solve.get()));
+                        } catch (RuntimeException | Error e) {
+                            work.set(i, CompletableFuture.failedFuture(e));
+                        }
+                    }
                 }
             } finally {
+                work.removeIf(Objects::isNull);
                 // Every task that started reads the mapped memory, so all of them must be over before it goes away,
                 // however they ended.
                 CompletableFuture.allOf(work.toArray(CompletableFuture[]::new)).handle((ok, failed) -> null).join();
