@@ -10,4 +10,8 @@ public class Clocks {
     public static long util() {
         return Util.m_137550_();
     }
+
+    public static long nano() {
+        return System.nanoTime();
+    }
 }
