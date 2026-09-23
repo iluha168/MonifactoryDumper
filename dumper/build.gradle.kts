@@ -1,7 +1,10 @@
 @file:Suppress("UnstableApiUsage")
 
+import java.io.RandomAccessFile
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.time.Duration
 
 plugins {
@@ -522,6 +525,15 @@ val rendererSettings = providers.gradleProperty("monifactory.dumper").map { sett
     }
 }.getOrElse(emptyList())
 
+/**
+ * How many games the full build runs at once (-Pmonifactory.processes=N, default 1). Each renders the recipes whose
+ * stable key hashes to its index into an artifact of its own, and a merge makes the one artifact of them. See
+ * [ShardedGames] and MergeShards. The render thread is one game's floor, so N games take about 1/N of the time.
+ */
+val processes = providers.gradleProperty("monifactory.processes").map { it.trim().toInt() }.getOrElse(1).also {
+    if (it < 1) throw GradleException("-Pmonifactory.processes must be at least 1, not $it")
+}
+
 val runGame = tasks.register<Exec>("runGame") {
     group = "modpack"
     description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
@@ -579,6 +591,14 @@ class Heap(private val size: String) : CommandLineArgumentProvider {
     override fun asArguments() = listOf("-Xmx$size")
 }
 
+/** MergeShards' command line: the artifact to write and every game's directory, which are named by index. */
+class MergeArguments(
+    private val out: Provider<File>, private val shards: Provider<File>, private val count: Int,
+) : CommandLineArgumentProvider {
+    override fun asArguments() = listOf("--out", out.get().absolutePath) +
+        (0 until count).flatMap { listOf("--shard", shards.get().resolve("$it").absolutePath) }
+}
+
 /** Kept out of the task body so the configuration cache has a class to serialize, not a script. */
 class ArgFile(private val file: Provider<RegularFile>) : CommandLineArgumentProvider {
     override fun asArguments() = listOf("@" + file.get().asFile.absolutePath)
@@ -609,7 +629,7 @@ val latestDump = dumpsDir.get().dir("latest")
 
 // What the artifact is a function of: the renderer, the pack and the launch. The instance directory itself is not an
 // input, since the game writes logs and options into it on every boot.
-fun Exec.dumpInputs() {
+fun Task.dumpInputs() {
     inputs.files(tasks.named("renameJar")).withPropertyName("renderer")
     inputs.files(pack.get().incoming.files).withPropertyName("pack")
     inputs.files(writeLaunchArgs).withPropertyName("launch")
@@ -643,25 +663,83 @@ fun Exec.requireArtifact(artifact: Provider<Directory>, images: Boolean = true) 
     }
 }
 
-val dump = tasks.register<Exec>("dump") {
-    group = "modpack"
-    description = "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, stills.pak, stills.json and meta.json."
+/** Where the games of a sharded build write, a directory per task and in it one per game, before the merge. */
+val shardsDir = layout.buildDirectory.dir("shards")
+/** The instance directories of a sharded build's games but the first, which runs in [instanceDir]. */
+val shardInstancesDir = layout.buildDirectory.dir("instances")
 
-    bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
-    dumpInputs()
-    outputs.dir(artifactDir)
-    requireArtifact(artifactDir)
+/**
+ * Registers [name], which writes the full artifact into [output]. With one process it is the game itself, as an Exec;
+ * with more, `<name>Shards` runs the games and [name] merges what they wrote. [games] configures whichever task runs
+ * games, [finish] whichever writes [output]; with one process that is the same task.
+ */
+fun registerDump(
+    name: String, output: Provider<Directory>, describe: String,
+    games: Task.() -> Unit = {}, finish: Task.() -> Unit = {},
+): TaskProvider<out Task> {
+    if (processes == 1) return tasks.register<Exec>(name) {
+        group = "modpack"
+        description = describe
+        bootRenderer("dump", output, *rendererSettings.toTypedArray())
+        dumpInputs()
+        outputs.dir(output)
+        requireArtifact(output)
+        games()
+        finish()
+    }
 
-    // build/dumps/latest, a relative symlink to the artifact this task last finished. It is what dumpArtifact hands to
-    // other projects: Gradle wants an artifact's path while it resolves the dependency graph, which is before the
-    // download has said which pack version this is.
-    val latest = latestDump.asFile.toPath()
-    val target = artifactDir.map { it.asFile.name }
-    doLast {
-        Files.deleteIfExists(latest)
-        Files.createSymbolicLink(latest, Path.of(target.get()))
+    // Named after the task, not the pack: the pack's name is not known until it is downloaded, and the merge's inputs
+    // are resolved before that.
+    val shards = shardsDir.map { it.dir(name) }
+    val sharded = tasks.register<ShardedGames>(name + "Shards") {
+        group = "modpack"
+        description = "Runs $processes games at once, each rendering its share of the recipes into build/shards/$name."
+        dependsOn(writeLaunchArgs, installPack)
+        dumpInputs()
+        count = processes
+        settings = rendererSettings.map { (key, value) -> "$key=$value" }
+        heap = maxHeap
+        javaExecutable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
+        argFile = launchArgs
+        instance = instanceDir
+        instances = shardInstancesDir
+        natives = nativesDir
+        this.shards = shards
+        doFirst(HeadlessInstance(instanceDir.get().asFile))
+        games()
+    }
+    return tasks.register<JavaExec>(name) {
+        group = "modpack"
+        description = describe
+        classpath = compareToolPath.get()
+        mainClass = "com.iluha168.monifactory.compare.MergeShards"
+        javaLauncher = javaToolchains.launcherFor(java.toolchain)
+        // Every shard's recipes.json at once, as text, and a digest per still.
+        maxHeapSize = "4G"
+        inputs.files(sharded).withPropertyName("shards")
+        outputs.dir(output)
+        val out = output.map { it.asFile }
+        argumentProviders.add(MergeArguments(out, shards.map { it.asFile }, processes))
+        doFirst { out.get().deleteRecursively() }
+        finish()
     }
 }
+
+val dump = registerDump(
+    "dump", artifactDir,
+    "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, stills.pak, stills.json and meta.json.",
+    finish = {
+        // build/dumps/latest, a relative symlink to the artifact this task last finished. It is what dumpArtifact hands
+        // to other projects: Gradle wants an artifact's path while it resolves the dependency graph, which is before the
+        // download has said which pack version this is.
+        val latest = latestDump.asFile.toPath()
+        val target = artifactDir.map { it.asFile.name }
+        doLast {
+            Files.deleteIfExists(latest)
+            Files.createSymbolicLink(latest, Path.of(target.get()))
+        }
+    },
+)
 
 /**
  * The data-only artifact, recipes.json without images, in a directory of its own so it never replaces the full build's
@@ -743,19 +821,17 @@ dumpData.configure { finalizedBy(verifyDumpData) }
 /** Where the rebuild check puts its second build of the same pack version. */
 val rebuildDir = dumpsDir.zip(packName) { dumps, name -> dumps.dir("$name-rebuild") }
 
-val rebuild = tasks.register<Exec>("rebuild") {
-    group = "modpack"
-    description = "Builds the artifact of the same pack version a second time, into build/dumps/<pack>-<version>-rebuild."
-
-    bootRenderer("dump", rebuildDir, *rendererSettings.toTypedArray())
-    dumpInputs()
-    outputs.dir(rebuildDir)
-    requireArtifact(rebuildDir)
-    // Its whole point is to boot again.
-    outputs.upToDateWhen { false }
-    // After the first build, never beside it: two games at once would share the instance directory.
-    mustRunAfter(dump)
-}
+val rebuild = registerDump(
+    "rebuild", rebuildDir,
+    "Builds the artifact of the same pack version a second time, into build/dumps/<pack>-<version>-rebuild.",
+    games = {
+        // Its whole point is to boot again.
+        outputs.upToDateWhen { false }
+        // After the first build, never beside it: two games at once would share the instance directory.
+        mustRunAfter(dump)
+    },
+    finish = { outputs.upToDateWhen { false } },
+)
 
 val verifyRebuild = tasks.register<JavaExec>("verifyRebuild") {
     description = "Checks that every recipes.json picture of the rebuild can be drawn from its decodable stills."
@@ -824,5 +900,312 @@ abstract class JarJarMetadata : DefaultTask() {
             )
         }
         output.get().asFile.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(mapOf("jars" to entries))) + "\n")
+    }
+}
+
+/**
+ * The games of a sharded build, -Pmonifactory.processes=N: N at once, game k rendering the recipes whose stable key
+ * hashes to k into [shards]/k. MergeShards makes the artifact of them.
+ *
+ * Game 0 runs in the instance directory itself. Every other game gets one of its own under [instances], since a boot
+ * writes into its instance: logs, journeymap/, local/, fancymenu_data/, and nearly every file in config/, rewritten
+ * with the same text each boot (a few, such as config/oculus.properties, with a new timestamp in it). Two games writing
+ * one file at once could each read the other's half-written copy. So each extra instance is a fresh copy of game 0's
+ * (about 80 MB, a second or two), made before any game starts, except for what no boot writes: mods/, resourcepacks/
+ * and shaderpacks/ are symlinks to game 0's, which is where the 260 MB are. logs/ is not copied; each game keeps its
+ * own. The natives directory is per game too: LWJGL writes its libraries there when they are missing, and two games
+ * unpacking the same file at once could load a half-written one. The game's assets, libraries and Forge install are
+ * read only.
+ *
+ * A game that fails is started once more, on its own, while the others carry on; a second failure fails the build.
+ * Failing is: a non-zero exit (1 for the renderer's own failures, such as the server datapack reload that hangs about
+ * one boot in eight; 143 or 137 when an out-of-memory killer took it), an exit without a finished artifact, or
+ * [SILENCE] without a new line of output, which is a boot hung before the renderer exists to notice (its reload
+ * timeouts are 10 and 15 minutes, and a running batch logs every minute). Each failed attempt's logs/latest.log is kept
+ * next to the games' directories, since the next boot rolls it away.
+ */
+abstract class ShardedGames : DefaultTask() {
+    @get:Input
+    abstract val count: Property<Int>
+
+    /** -Pmonifactory.dumper's key=value pairs. An input through dumpInputs already. */
+    @get:Internal
+    abstract val settings: ListProperty<String>
+
+    /** Each game's -Xmx. Not an input, as for the single game: it changes nothing the artifact holds. */
+    @get:Internal
+    abstract val heap: Property<String>
+
+    @get:Internal
+    abstract val javaExecutable: Property<String>
+
+    @get:Internal
+    abstract val argFile: RegularFileProperty
+
+    @get:Internal
+    abstract val instance: DirectoryProperty
+
+    @get:Internal
+    abstract val instances: DirectoryProperty
+
+    @get:Internal
+    abstract val natives: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val shards: DirectoryProperty
+
+    companion object {
+        val SILENCE: Duration = Duration.ofMinutes(30)
+        private val PROGRESS: Duration = Duration.ofMinutes(5)
+        /** What no boot writes, so the extra instances link to game 0's instead of copying it. */
+        private val SHARED = setOf("mods", "resourcepacks", "shaderpacks")
+        /** What each instance keeps for itself. */
+        private val OWN = setOf("logs")
+        /** The artifact files a game writes, meta.json last. */
+        private val FILES = listOf("recipes.json", "stills.pak", "stills.json", "render.tsv", "shard.tsv", "meta.json")
+    }
+
+    private inner class Game(val index: Int, val instance: File, val args: File, val artifact: File) {
+        var attempt = 0
+        var process: Process? = null
+        /** The game's output, this attempt's. */
+        var log: File? = null
+        var killed: String? = null
+        var lastSize = -1L
+        var lastChange = 0L
+        var started = 0L
+        var done = false
+        val failures = mutableListOf<String>()
+
+        val running get() = process != null
+        /** Failed twice: the build fails whatever the other games do. */
+        val lost get() = !done && process == null && failures.size >= 2
+
+        fun start() {
+            attempt++
+            killed = null
+            artifact.deleteRecursively()
+            val log = shards.get().asFile.resolve("$index-attempt$attempt.out")
+            this.log = log
+            val command = buildList {
+                add(javaExecutable.get())
+                add("-Dmonifactory.dumper.mode=dump")
+                settings.get().forEach { add("-Dmonifactory.dumper.$it") }
+                add("-Dmonifactory.dumper.shards=${count.get()}")
+                add("-Dmonifactory.dumper.shard=$index")
+                add("-Dmonifactory.dumper.output=${artifact.absolutePath}")
+                add("-Xmx${heap.get()}")
+                add("@${args.absolutePath}")
+            }
+            val builder = ProcessBuilder(command).directory(instance).redirectErrorStream(true)
+                .redirectOutput(log)
+            // As for the single game: no display server, so nothing in the pack can open a window.
+            builder.environment().remove("DISPLAY")
+            builder.environment().remove("WAYLAND_DISPLAY")
+            process = builder.start()
+            started = System.nanoTime()
+            lastChange = started
+            lastSize = -1
+            logger.lifecycle("game $index: attempt $attempt started in $instance, output in $log")
+        }
+
+        fun poll(now: Long) {
+            val running = process ?: return
+            if (running.isAlive) {
+                val size = log!!.length()
+                if (size != lastSize) {
+                    lastSize = size
+                    lastChange = now
+                } else if (killed == null && now - lastChange > SILENCE.toNanos()) {
+                    killed = "wrote nothing for ${SILENCE.toMinutes()} minutes"
+                    logger.warn("game $index $killed; stopping it")
+                    kill()
+                }
+                return
+            }
+            process = null
+            val exit = running.exitValue()
+            val minutes = (now - started) / 60_000_000_000L
+            val missing = FILES.filterNot { artifact.resolve(it).isFile }
+            if (killed == null && exit == 0 && missing.isEmpty()) {
+                done = true
+                logger.lifecycle("game $index: done in $minutes min")
+                return
+            }
+            val reason = killed ?: when {
+                exit == 143 || exit == 137 -> "was killed ($exit), most likely by an out-of-memory killer"
+                exit != 0 -> "exited with $exit"
+                else -> "exited without finishing its artifact: ${missing.joinToString()} missing"
+            }
+            // The next boot in this instance rolls latest.log away.
+            val saved = shards.get().asFile.resolve("$index-attempt$attempt.latest.log")
+            val latest = instance.resolve("logs/latest.log")
+            if (latest.isFile) latest.copyTo(saved, overwrite = true)
+            failures += "game $index, attempt $attempt, $reason after $minutes min: see $saved"
+            if (attempt < 2) {
+                logger.warn("game $index $reason after $minutes min; its log is $saved. Starting it again.")
+                start()
+            }
+        }
+
+        fun kill() {
+            process?.let { running ->
+                running.descendants().forEach { it.destroyForcibly() }
+                running.destroyForcibly()
+            }
+        }
+
+        /** The last [dumper] line of the game's output, for the progress report. */
+        fun lastDumperLine(): String? {
+            val log = log ?: return null
+            if (!log.isFile) return null
+            RandomAccessFile(log, "r").use { file ->
+                val start = maxOf(0L, file.length() - 65536)
+                val bytes = ByteArray((file.length() - start).toInt())
+                file.seek(start)
+                file.readFully(bytes)
+                return String(bytes, Charsets.UTF_8).lineSequence().lastOrNull { "[dumper]" in it }
+                    ?.substringAfter("[dumper] ")?.take(300)
+            }
+        }
+    }
+
+    @TaskAction
+    fun run() {
+        val n = count.get()
+        val every = settings.get().map { it.split("=", limit = 2) }.lastOrNull { it[0] == "every" }?.get(1)
+        if (every != null && every.trim() != "1") {
+            throw GradleException(
+                "every=$every picks every Nth recipe by its place in EMI's list, and that list differs by a few "
+                    + "dozen recipes from boot to boot, so $n games would count from different places. Use "
+                    + "sample=$every: it picks by what a recipe is, which every game agrees on."
+            )
+        }
+        warnAboutMemory(n)
+
+        val root = shards.get().asFile
+        root.deleteRecursively()
+        root.mkdirs()
+        val source = instance.get().asFile
+        val games = (0 until n).map { k ->
+            if (k == 0) {
+                Game(0, source, argFile.get().asFile, root.resolve("0"))
+            } else {
+                val own = instances.get().asFile.resolve("$k")
+                val ownNatives = instances.get().asFile.resolve("$k-natives")
+                val prepared = System.nanoTime()
+                prepare(source, own)
+                ownNatives.mkdirs()
+                val args = instances.get().asFile.resolve("$k.args")
+                args.writeText(retarget(argFile.get().asFile.readText(), source, own, ownNatives))
+                logger.info("instance $own prepared in ${(System.nanoTime() - prepared) / 1_000_000} ms")
+                Game(k, own, args, root.resolve("$k"))
+            }
+        }
+
+        logger.lifecycle("running $n games at once, -Xmx${heap.get()} each; game 0 in $source, the others in "
+            + "${instances.get().asFile}; their artifacts go to $root")
+        try {
+            games.forEach { it.start() }
+            var lastProgress = System.nanoTime()
+            // A game that failed twice fails the build, so the others stop then rather than hours later.
+            while (games.any { it.running } && games.none { it.lost }) {
+                Thread.sleep(2000)
+                val now = System.nanoTime()
+                games.forEach { it.poll(now) }
+                if (now - lastProgress > PROGRESS.toNanos()) {
+                    lastProgress = now
+                    games.filter { it.running }.forEach { game ->
+                        logger.lifecycle("game ${game.index}: ${game.lastDumperLine() ?: "booting"}")
+                    }
+                }
+            }
+        } finally {
+            // Cancelled or timed out: no game outlives the build.
+            games.forEach { it.kill() }
+        }
+
+        val lost = games.filter { it.lost }
+        if (lost.isNotEmpty()) {
+            val stopped = games.filter { !it.done && !it.lost }.map { it.index }
+            throw GradleException("${lost.size} of $n games failed twice"
+                + (if (stopped.isEmpty()) "" else ", so games $stopped were stopped") + ":\n  "
+                + lost.flatMap { it.failures }.joinToString("\n  "))
+        }
+        games.filter { it.failures.isNotEmpty() }.forEach { game ->
+            logger.warn("game ${game.index} needed a second attempt: ${game.failures.joinToString("; ")}")
+        }
+    }
+
+    /**
+     * Makes [target] a copy of [source] for a game of its own: [SHARED] as symlinks, [OWN] left as it is, everything
+     * else copied fresh. Anything there from the last run is removed first, so the copy is what [source] holds now.
+     * Never follows a symlink while deleting, or the mods would go with it.
+     */
+    private fun prepare(source: File, target: File) {
+        target.mkdirs()
+        target.listFiles()!!.filter { it.name !in OWN }.forEach { deleteTree(it.toPath()) }
+        source.listFiles()!!.filter { it.name !in OWN }.forEach { entry ->
+            val to = target.toPath().resolve(entry.name)
+            if (entry.name in SHARED) Files.createSymbolicLink(to, entry.toPath().toAbsolutePath())
+            else copyTree(entry.toPath(), to)
+        }
+    }
+
+    private fun deleteTree(path: Path) {
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            Files.list(path).use { children -> children.toList() }.forEach(::deleteTree)
+        }
+        Files.delete(path)
+    }
+
+    private fun copyTree(from: Path, to: Path) {
+        Files.walk(from).use { paths ->
+            paths.forEach { path ->
+                val copy = to.resolve(from.relativize(path).toString())
+                if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(copy)
+                else Files.copy(path, copy, StandardCopyOption.COPY_ATTRIBUTES,
+                    LinkOption.NOFOLLOW_LINKS)
+            }
+        }
+    }
+
+    /** The argfile with game 0's instance and natives directories swapped for another game's. */
+    private fun retarget(args: String, source: File, instance: File, natives: File): String {
+        // As writeLaunchArgs quotes them.
+        fun quoted(file: File) = file.absolutePath.replace("\\", "\\\\").replace("\"", "\\\"")
+        val game = "\"" + quoted(source) + "\""
+        val nativesPath = quoted(this.natives.get().asFile) + "\""
+        if (game !in args || nativesPath !in args) {
+            throw GradleException("${argFile.get().asFile} names neither $source nor ${this.natives.get().asFile}")
+        }
+        return args.replace(game, "\"" + quoted(instance) + "\"").replace(nativesPath, quoted(natives) + "\"")
+    }
+
+    /**
+     * Warns when the games may not fit in memory. One game's resident size has been its heap plus about 2 to 3 GB (5.8
+     * to 6.5 GB at -Xmx4G, 7 to 8 GB at -Xmx5G). What happens when they do not fit was seen on a laptop with 10 GB
+     * free: without swap, earlyoom killed the games (exit 143) within minutes; with swap, both games slowed to a crawl
+     * and the NVIDIA driver failed to map GPU memory, which left the GPU needing a reboot.
+     */
+    private fun warnAboutMemory(n: Int) {
+        val meminfo = File("/proc/meminfo")
+        if (!meminfo.isFile) return
+        fun kib(key: String) = meminfo.readLines().firstOrNull { it.startsWith("$key:") }
+            ?.let { Regex("""\d+""").find(it)?.value?.toLong() }
+        val total = kib("MemTotal") ?: return
+        val available = kib("MemAvailable") ?: total
+        val match = Regex("""(\d+)([kKmMgGtT]?)""").matchEntire(heap.get().trim()) ?: return
+        val unit = when (match.groupValues[2].lowercase()) {
+            "k" -> 1L; "m" -> 1L shl 10; "g" -> 1L shl 20; "t" -> 1L shl 30; else -> 0L
+        }
+        val heapKib = if (unit == 0L) match.groupValues[1].toLong() / 1024 else match.groupValues[1].toLong() * unit
+        val needed = n * (heapKib + (3L shl 20))
+        if (needed > available) {
+            logger.warn("$n games at -Xmx${heap.get()} want about ${needed shr 20} GB (heap plus about 3 GB each), "
+                + "and ${available shr 20} of this machine's ${total shr 20} GB are available. An out-of-memory "
+                + "killer may take a game, and swapping them has taken the GPU driver down with it; close programs, "
+                + "or use a smaller -Pmonifactory.processes.")
+        }
     }
 }

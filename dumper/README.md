@@ -46,11 +46,12 @@ size `stills.json` gives, every record's picture only uses stills that exist, at
 its recipe's size, and meta.json's counts agree. `./gradlew :dumper:compare:verifyArtifact
 -Pmonifactory.artifact=<dir>` runs the same check on any directory.
 
-What it costs: a GPU with an EGL driver, about 7 GB of RAM at `-Pmonifactory.heap=4G` (the default 8G heap wants
-more; 3G is too small and runs out during EMI's reload), and hours of wall clock: about four for the drawing on a
-laptop RTX 3050 with 12 hardware threads (an `every=50` sample took 290 to 310 s). Rendering is the long part, since
-about 40% of recipes have a layer that animates, and each such layer is drawn frame by frame until its loop closes or
-400 frames go by. The first run also downloads about 1 GB (the pack, Minecraft, Forge's libraries and the game's
+What it costs: a GPU with an EGL driver, about 6 to 6.5 GB of RAM at `-Pmonifactory.heap=4G` and 7 to 8 GB at 5G (the
+default 8G heap wants more; 3G is too small and runs out during EMI's reload), and a few hours of wall clock on a laptop
+RTX 3050 with 12 hardware threads: about 3 minutes to boot, then about 71 ms of the game's render thread per recipe,
+two and a half hours for the whole corpus (an `every=50` sample's batch took 3 minutes). Rendering is the long part,
+since about 40% of recipes have a layer that animates, and each such layer is drawn frame by frame until its loop closes
+or 400 frames go by. The first run also downloads about 1 GB (the pack, Minecraft, Forge's libraries and the game's
 assets). Run it on an otherwise idle machine: if an out-of-memory killer takes the game, the build fails with exit 143
 and starts over next time.
 
@@ -74,7 +75,53 @@ contradict each other.
 Renderer settings go through `-Pmonifactory.dumper=key=value,...`. Two of them make a sample in about 1/N of the
 time. `every=N` renders every Nth recipe in corpus order, a proportional sample of every category, which is the one to
 estimate sizes and timings from. `sample=N` picks about one recipe in N by a hash of what the recipe is, which is the
-one two builds can be compared on (see below). meta.json marks either artifact `"partial": true`.
+one two builds can be compared on (see below). meta.json marks either artifact `"partial": true`. `count=N` renders only
+the first N recipes of whatever those pick, for trying the build out.
+
+## Several games at once
+
+```sh
+./gradlew :dumper:dump -Pmonifactory.heap=4G -Pmonifactory.processes=3
+```
+
+The render thread is where a game spends its time, and a game has one, so the build can run N games side by side, each
+drawing its share of the recipes, and merge what they write. The artifact is the same kind of directory in the same
+place, with `latest` moved and `verifyDump` run the same way. Leave it out (or say 1) and the build is one game as
+above, with no merge.
+
+- Which game draws a recipe is a hash of what the recipe is (its category and ids, or its stacks), not its place in
+  EMI's list, since that list gains or loses a few dozen recipes from boot to boot. `sample=N` is a hash of the same
+  kind, so it picks the same recipes in every game. `count=N` is the first N of the recipes picked, split between the
+  games. `every=N` picks by place in the list, which is not the same in any two boots, so the build refuses it with
+  more than one game; use `sample=N` instead.
+- The games start together. Each runs in an instance directory of its own, since a boot writes into its instance:
+  `logs/`, `journeymap/`, `local/`, `fancymenu_data/`, and nearly every file in `config/` (rewritten with the same text
+  each boot, a few with a new timestamp). Game 0 runs in `dumper/build/instance`; game k in
+  `dumper/build/instances/<k>`, a fresh copy of game 0's made before the games start (about 80 MB, a second or two),
+  whose `mods/`, `resourcepacks/` and `shaderpacks/` are symlinks to game 0's, since no boot writes there. Each game
+  has its own natives directory too, `dumper/build/instances/<k>-natives`.
+- Each game uses fewer threads: encoders `(cores - 1 - N) / N` instead of `cores - 2`, and two matte threads instead of
+  four. `-Pmonifactory.heap` is each game's heap.
+- A game that fails is started again once, on its own, while the others go on: a non-zero exit (the server datapack
+  reload timeout, or 143 when an out-of-memory killer took it), an exit without a finished artifact, or 30 minutes
+  without a line of output (a boot hung in mod construction, which one game alone waits 12 hours on). A second failure
+  stops every game and fails the build, naming the logs. Each game's output is in `dumper/build/shards/dump/<k>-attempt<a>.out`,
+  the `logs/latest.log` of a failed attempt is kept next to it as `<k>-attempt<a>.latest.log`, and each instance keeps
+  its own `logs/`.
+- The games write `dumper/build/shards/dump/<k>`, each an artifact of its own recipes plus `shard.tsv`, the key of every
+  recipe its boot picked, in its order. `MergeShards` (in `:dumper:compare`) makes one artifact of them. Records follow
+  game 0's list; a recipe only another game's boot had goes right after the recipe before it in that game's list.
+  Still ids are handed out again in record order, and a still two games both drew is stored once: equal pictures encode
+  to equal WebP bytes, so the merge keeps one copy of equal bytes and copies payloads without re-encoding them.
+  `categories.tsv` and `corpus` are game 0's. meta.json says `"processes": N` and `"drift"`, how many recipes some
+  game's boot listed and another's did not, and the merge prints the same with how many of those were drawn.
+- The shards merge in whatever order they finished; the result depends only on what they hold.
+
+Memory is the limit. Each game needs its heap plus 2 to 3 GB, and the build warns when N of them want more than the
+machine has available. Believe the warning. With 10 GB free, two 4G games were killed by earlyoom within minutes; with
+swap turned on instead, both slowed to a crawl, and the NVIDIA driver failed to map GPU memory and left the GPU needing
+a reboot. `rebuild` and `rebuildCheck` take `-Pmonifactory.processes` too (their games write
+`dumper/build/shards/rebuild`); `dumpData` is always one game.
 
 ## Recipes without images
 
@@ -184,10 +231,13 @@ few dozen recipes between boots, so two `every` samples hold different recipes a
 
 - About one boot in eight has hung in mod construction: a GregTech worker spinning in `DynamicRenderManager.register`
   before the renderer exists to notice. The dump task gives up after 12 hours; kill it sooner if the log stops moving
-  before the `[dumper]` lines start, and run it again.
-- The server datapack reload has a 10 minute timeout of its own and fails the run if it hangs.
+  before the `[dumper]` lines start, and run it again. With `-Pmonifactory.processes` above 1, a game whose output stops
+  for 30 minutes is stopped and started again.
+- The server datapack reload has a 10 minute timeout of its own and fails the run if it hangs. With several games, the
+  game that hit it is started again once.
 - If the game exits before meta.json is written, the dump fails with "The game exited without finishing the
   artifact", even when the JVM's status was 0. Running out of heap ends that way: Minecraft stops itself on an
   `OutOfMemoryError` and exits cleanly. Give it more `-Pmonifactory.heap`.
 - The renderer ends the JVM with status 1 on any failure (never through Minecraft's crash screen, which a mod in the
-  pack would turn into a return to the title screen). The reason is in `dumper/build/instance/logs/latest.log`.
+  pack would turn into a return to the title screen). The reason is in `dumper/build/instance/logs/latest.log`, or,
+  with several games, in the log the build names.
