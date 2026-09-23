@@ -17,6 +17,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -95,6 +98,9 @@ final class Batch {
     private final FallbackTally fallbacks = new FallbackTally();
     private int layered, fallback, failed;
     private long layers, animated, clockLayers, clockStatic, frames;
+    /** Layers drawn over black and white, and how many of them used each blend state that made them. */
+    private long matteLayers;
+    private final Map<String, Integer> matteBlends = new TreeMap<>();
 
     private int next;
     private RecipeJob job;
@@ -285,6 +291,10 @@ final class Batch {
     /** Takes a finished recipe's result: its stills to the writer, its picture and diagnostics to the records. */
     private void record(int index, RecipeJob done) {
         modes[index] = done.mode();
+        for (Set<BlendState> blends : done.matteBlends()) {
+            matteLayers++;
+            for (BlendState blend : blends) matteBlends.merge(blend.toString(), 1, Integer::sum);
+        }
         if (done.mode() == RecipeJob.Mode.FAILED) {
             failed++;
             reasons[index] = done.failure();
@@ -354,6 +364,8 @@ final class Batch {
                 table.size(), table.bytes(), stages(), n == 0 ? 0 : sum(recipeNanos) / n / 1_000_000L, encodes.get(),
                 encodes.get() == 0 ? 0 : encodeNanos.get() / encodes.get() / 1_000_000L, encoderThreads, stalls,
                 stallNanos / 1_000_000_000L, tail);
+        LOG.info("[dumper] {} layers drawn over black and white, not once, for the blend states they used: {}",
+                matteLayers, matteBlends);
         if (fallbacks.total() > 0) {
             LOG.info("[dumper] drawn whole, by reason:{}", fallbacks.byReason());
             LOG.info("[dumper] drawn whole, by category (top {}):{}", TOP_CATEGORIES,

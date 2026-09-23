@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.IntBuffer;
 import java.util.Arrays;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -161,5 +162,181 @@ class MatteTest {
     void aDrawWithNoInsideIsRefused() {
         assertThrows(IllegalArgumentException.class, () -> new Pair(2, 3).solve());
         assertThrows(IllegalArgumentException.class, () -> new Pair(3, 2).solve());
+        assertThrows(IllegalArgumentException.class, () -> new Single(2, 3).solve());
+        assertThrows(IllegalArgumentException.class, () -> new Single(3, 2).solve());
+    }
+
+    // One draw over a transparent clear.
+
+    /** Premultiplied RGB and transmittance as the GL reads them back. */
+    private static int once(int r, int g, int b, int t) {
+        return t << 24 | b << 16 | g << 8 | r;
+    }
+
+    private static final int CLEAR = once(0, 0, 0, 255);
+
+    /** One draw as {@link TileRenderer} leaves it, at an offset into a wider buffer, bottom row first. */
+    private static final class Single {
+        final int width, height, stride, at;
+        final int[] pixels;
+
+        Single(int width, int height) {
+            this.width = width;
+            this.height = height;
+            this.stride = width + 4;
+            this.at = 3;
+            this.pixels = new int[at + height * stride + 5];
+            Arrays.fill(pixels, GARBAGE);
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++) set(x, y, CLEAR);
+        }
+
+        Single set(int x, int y, int pixel) {
+            pixels[at + (height - 1 - y) * stride + x] = pixel;
+            return this;
+        }
+
+        Matte.Result solve() {
+            return Matte.unpremultiply(IntBuffer.wrap(pixels), at, stride, width, height);
+        }
+    }
+
+    @Test
+    void oneOpaqueDrawComesOutAsDrawn() {
+        Matte.Result result = new Single(3, 3).set(1, 1, once(200, 100, 50, 0)).solve();
+        assertEquals(0xFFC86432, only(result));
+        assertEquals(0, result.alphaSpread());
+        assertFalse(result.escaped());
+    }
+
+    @Test
+    void oneDrawAtHalfAlphaSolvesAsTheTwoDrawsDo() {
+        // (200, 100, 50) at alpha 128: premultiplied 100, 50, 25, transmittance 127. The same picture as
+        // halfAlphaSolvesToTheLevelNearestTheColour.
+        Matte.Result result = new Single(3, 3).set(1, 1, once(100, 50, 25, 127)).solve();
+        assertEquals(0x80C76432, only(result));
+        assertEquals(0, result.alphaSpread());
+    }
+
+    @Test
+    void oneDrawUntouchedIsTransparentBlack() {
+        Matte.Result result = new Single(3, 3).solve();
+        assertEquals(0, only(result));
+        assertFalse(result.escaped());
+    }
+
+    @Test
+    void aChannelAboveItsAlphaIsNotOver() {
+        // An additive draw on a translucent pixel: alpha 100, red 200. Over by 100; red clamps.
+        Matte.Result result = new Single(3, 3).set(1, 1, once(200, 10, 20, 155)).solve();
+        assertEquals(100, result.alphaSpread());
+        assertFalse(result.over());
+        assertEquals(100 << 24 | 0xFF << 16 | 26 << 8 | 51, only(result));
+        // Colour where nothing covers is over by that much too.
+        assertEquals(7, new Single(3, 3).set(1, 1, once(0, 7, 0, 255)).solve().alphaSpread());
+        // Two levels of rounding pass, three don't.
+        assertTrue(new Single(3, 3).set(1, 1, once(102, 100, 0, 155)).solve().over());
+        assertFalse(new Single(3, 3).set(1, 1, once(103, 100, 0, 155)).solve().over());
+    }
+
+    @Test
+    void oneDrawRowsComeOutTopFirstAndTheRingIsCroppedOff() {
+        Single single = new Single(5, 4);
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 5; x++) {
+                boolean ring = x == 0 || y == 0 || x == 4 || y == 3;
+                single.set(x, y, ring ? CLEAR : once(x, y, 0, 0));
+            }
+        Matte.Result result = single.solve();
+        assertEquals(3, result.still().width());
+        assertEquals(2, result.still().height());
+        for (int y = 0; y < 2; y++)
+            for (int x = 0; x < 3; x++)
+                assertEquals(0xFF000000 | (x + 1) << 16 | (y + 1) << 8, result.still().argb()[y * 3 + x], x + "," + y);
+        assertFalse(result.escaped());
+    }
+
+    @Test
+    void anythingOnTheRingOfOneDrawIsAnEscape() {
+        int[][] ring = {{0, 0}, {2, 0}, {4, 0}, {0, 2}, {4, 2}, {0, 3}, {4, 3}, {1, 3}};
+        for (int[] at : ring) {
+            // Colour alone, and coverage alone: a draw that only darkens what is below leaves colour 0.
+            assertTrue(new Single(5, 4).set(at[0], at[1], once(0, 1, 0, 255)).solve().escaped(), Arrays.toString(at));
+            assertTrue(new Single(5, 4).set(at[0], at[1], once(0, 0, 0, 254)).solve().escaped(), Arrays.toString(at));
+        }
+        assertFalse(new Single(5, 4).set(2, 2, once(7, 7, 7, 0)).solve().escaped());
+    }
+
+    /**
+     * Layers of up to five draws on one pixel, each standard "over", blending off (which replaces the pixel whatever
+     * the fragment's alpha), or the additive glint on an opaque pixel, drawn the way an 8-bit target blends them: over
+     * black, over white and over grey for real, and once in the capture's terms (see {@link BlendState}). Composited
+     * back over black, white and grey, one draw's picture is as good as two draws'.
+     */
+    @Test
+    void oneDrawReproducesTheLayerOverAnyBackgroundAsTheTwoDrawsDo() {
+        Random random = new Random(42);
+        int worstOne = 0, worstTwo = 0;
+        for (int trial = 0; trial < 100_000; trial++) {
+            int[] black = {0, 0, 0}, white = {255, 255, 255}, grey = {128, 128, 128}, p = {0, 0, 0};
+            int t = 255;
+            boolean opaque = false;
+            for (int draws = 1 + random.nextInt(5); draws > 0; draws--) {
+                int kind = random.nextInt(opaque ? 3 : 2);
+                int a = random.nextInt(4) == 0 ? 255 : random.nextInt(256);
+                int[] c = {random.nextInt(256), random.nextInt(256), random.nextInt(256)};
+                for (int ch = 0; ch < 3; ch++) {
+                    switch (kind) {
+                        case 0 -> {
+                            black[ch] = over(c[ch], a, black[ch]);
+                            white[ch] = over(c[ch], a, white[ch]);
+                            grey[ch] = over(c[ch], a, grey[ch]);
+                            p[ch] = over(c[ch], a, p[ch]);
+                        }
+                        case 1 -> black[ch] = white[ch] = grey[ch] = p[ch] = c[ch];
+                        default -> {
+                            int glint = Math.round(c[ch] * c[ch] / 255f) / 4;
+                            black[ch] = Math.min(255, black[ch] + glint);
+                            white[ch] = Math.min(255, white[ch] + glint);
+                            grey[ch] = Math.min(255, grey[ch] + glint);
+                            p[ch] = Math.min(255, p[ch] + glint);
+                        }
+                    }
+                }
+                switch (kind) {
+                    case 0 -> t = Math.round(t * (1 - a / 255f));
+                    case 1 -> {
+                        t = 0;
+                        opaque = true;
+                    }
+                    default -> {
+                    }
+                }
+            }
+            Matte.Result one = new Single(3, 3).set(1, 1, once(p[0], p[1], p[2], t)).solve();
+            Matte.Result two = new Pair(3, 3).set(1, 1, gl(black[0], black[1], black[2]),
+                    gl(white[0], white[1], white[2])).solve();
+            assertTrue(one.over(), "trial " + trial);
+            int[][] backgrounds = {{0, 0, 0}, {255, 255, 255}, {128, 128, 128}};
+            int[][] real = {black, white, grey};
+            for (int k = 0; k < 3; k++) {
+                for (int ch = 0; ch < 3; ch++) {
+                    worstOne = Math.max(worstOne, Math.abs(composite(only(one), ch, backgrounds[k][ch]) - real[k][ch]));
+                    worstTwo = Math.max(worstTwo, Math.abs(composite(only(two), ch, backgrounds[k][ch]) - real[k][ch]));
+                }
+            }
+        }
+        assertTrue(worstOne <= Math.max(1, worstTwo), "one draw is off by " + worstOne + ", two by " + worstTwo);
+    }
+
+    /** An 8-bit target's standard "over": {@code round(c*a + d*(1-a))}. */
+    private static int over(int c, int a, int d) {
+        return Math.round(c * a / 255f + d * (1 - a / 255f));
+    }
+
+    /** Channel {@code ch} (0 red) of a straight-alpha {@code argb} over {@code background}, as the consumer draws it. */
+    private static int composite(int argb, int ch, int background) {
+        int a = argb >>> 24, c = argb >>> (16 - 8 * ch) & 0xFF;
+        return Math.round(c * a / 255f + background * (1 - a / 255f));
     }
 }

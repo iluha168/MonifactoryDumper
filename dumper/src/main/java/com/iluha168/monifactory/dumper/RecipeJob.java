@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -26,12 +27,13 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * the batch calls {@link #step} on until it returns true. A step is one pass or two of drawing, a few milliseconds, so
  * the batch can hand the frame back to the game loop between any two steps, even in the middle of a sequence.
  * <p>
- * <b>Frame 0.</b> The recipe is planned at {@link #BASE_MILLIS} and every layer drawn in one submission, the
- * recorder watching each black draw. A layer that drew on its guard ring gets the whole canvas as its box and is drawn
- * again; boxes stay what frame 0 made them for the rest of the recipe, since every still of a layer must be one size.
- * Then the real render is drawn at the same time and atlas state, and the layers composited are compared with it.
- * Layers the recorder saw read only a clock are drawn again at two other times, each with a plan of its own
- * (DESIGN 3.4), and are static if both come out as frame 0 did.
+ * <b>Frame 0.</b> The recipe is planned at {@link #BASE_MILLIS} and every layer drawn once in one submission, the
+ * recorder watching each draw. A layer that drew on its guard ring gets the whole canvas as its box, and one that
+ * blended in a way one draw can't capture (DESIGN 3.2) is drawn over black and white from then on; either is drawn
+ * again. Boxes and ways of drawing stay what frame 0 made them for the rest of the recipe, since every still of a
+ * layer must be one size. Then the real render is drawn at the same time and atlas state, and the layers composited
+ * are compared with it. Layers the recorder saw read only a clock are drawn again at two other times, each with a plan
+ * of its own (DESIGN 3.4), and are static if both come out as frame 0 did.
  * <p>
  * <b>Sequence.</b> With any layer left animated, frame after frame gets the atlas ticked and the clock moved by
  * {@link FakeTime#FRAME_MILLIS}, a new plan, and a submission of the animated layers whose {@link LayerLoop} has not
@@ -41,10 +43,11 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * every animated layer and the real render too, and so does the last frame drawn, whose atlas state is still the
  * current one when the sequence ends.
  * <p>
- * <b>Fallback.</b> Any failed check, a layer that is not a plain "over", a layer that escapes its box after frame 0,
- * a plan whose layers change, or anything thrown, and the layered result is dropped: the recipe is drawn whole from
- * where the atlas stands, watched by the recorder like one layer (probed the same way if it only read a clock), and
- * sequenced with one {@link FramePolicy} over whole frames if it animates. Only a failure there fails the recipe.
+ * <b>Fallback.</b> Any failed check, a layer that is not a plain "over", a layer that escapes its box or blends in a
+ * way one draw can't capture after frame 0, a plan whose layers change, or anything thrown, and the layered result is
+ * dropped: the recipe is drawn whole from where the atlas stands, watched by the recorder like one layer (probed the
+ * same way if it only read a clock), and sequenced with one {@link FramePolicy} over whole frames if it animates. Only
+ * a failure there fails the recipe.
  * <p>
  * Nothing leaves the job until it is done: the batch reads {@link #layers()} then, so a recipe that fell back adds no
  * layered stills to the artifact. Render thread only.
@@ -105,6 +108,10 @@ final class RecipeJob {
     // The layered attempt.
     private LayerPlan plan0;
     private LayerPlan.Box[] boxes;
+    /** Per layer, whether it is drawn over black and white rather than once. */
+    private boolean[] matte;
+    /** The blend states that made each such layer be drawn so, for the log. Kept past a fallback. */
+    private final List<Set<BlendState>> matteBlends = new ArrayList<>();
     /** Each layer's frame-0 picture, which is also every later one for a static layer. */
     private TileRenderer.Matted[] first;
     /** Per layer, its loop if it animates, else null. */
@@ -180,13 +187,14 @@ final class RecipeJob {
         int n = plan.layers().size();
         LayerPlan.Box canvas = new LayerPlan.Box(0, 0, plan.width(), plan.height());
         boxes = new LayerPlan.Box[n];
+        matte = new boolean[n];
         LayerRecorder.Trace[] traces = new LayerRecorder.Trace[n];
         List<TileRenderer.Tile> tiles = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
             LayerPlan.Layer layer = plan.layers().get(i);
             boxes[i] = layer.box();
             int at = i;
-            tiles.add(new TileRenderer.Tile(boxes[i], layer::draw, draw -> {
+            tiles.add(new TileRenderer.Tile(boxes[i], layer::draw, false, draw -> {
                 tools.recorder().start();
                 try {
                     draw.run();
@@ -202,20 +210,26 @@ final class RecipeJob {
         first = collect(all).toArray(TileRenderer.Matted[]::new);
 
         // Escaped layers get the whole canvas. Its ring lies outside the canvas's viewport, where nothing can draw, so
-        // a layer drawn at the whole canvas never escapes: it is clipped exactly as the real render clips it.
-        List<Integer> escaped = new ArrayList<>();
-        for (int i = 0; i < n; i++) if (first[i].escaped()) escaped.add(i);
-        if (!escaped.isEmpty()) {
-            List<TileRenderer.Tile> again = new ArrayList<>(escaped.size());
-            for (int i : escaped) {
-                boxes[i] = canvas;
-                again.add(new TileRenderer.Tile(canvas, plan.layers().get(i)::draw));
+        // a layer drawn at the whole canvas never escapes: it is clipped exactly as the real render clips it. Layers
+        // one draw can't capture are drawn over black and white.
+        List<Integer> redraw = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            boolean escaped = first[i].escaped(), blends = !first[i].uncaptured().isEmpty();
+            if (escaped) boxes[i] = canvas;
+            if (blends) {
+                matte[i] = true;
+                matteBlends.add(first[i].uncaptured());
             }
+            if (escaped || blends) redraw.add(i);
+        }
+        if (!redraw.isEmpty()) {
+            List<TileRenderer.Tile> again = new ArrayList<>(redraw.size());
+            for (int i : redraw) again.add(new TileRenderer.Tile(boxes[i], plan.layers().get(i)::draw, matte[i]));
             TileRenderer.Matted[] redrawn = collect(submit(plan, again)).toArray(TileRenderer.Matted[]::new);
-            for (int k = 0; k < escaped.size(); k++) first[escaped.get(k)] = redrawn[k];
+            for (int k = 0; k < redraw.size(); k++) first[redraw.get(k)] = redrawn[k];
         }
         for (int i = 0; i < n; i++) {
-            if (!plainOver(first[i], i, 0)) return;
+            if (!usable(first[i], i, 0)) return;
         }
 
         // Clock-only layers: drawn at two other times, each from a plan of its own, while the real render is on its
@@ -242,7 +256,8 @@ final class RecipeJob {
                     continue;
                 }
                 List<TileRenderer.Tile> probeTiles = new ArrayList<>(clock.size());
-                for (int i : clock) probeTiles.add(new TileRenderer.Tile(boxes[i], probe.layers().get(i)::draw));
+                for (int i : clock)
+                    probeTiles.add(new TileRenderer.Tile(boxes[i], probe.layers().get(i)::draw, matte[i]));
                 probes.add(submit(probe, probeTiles));
             }
         }
@@ -253,7 +268,8 @@ final class RecipeJob {
             for (int k = 0; k < clock.size(); k++) {
                 TileRenderer.Matted m = drawn.get(k);
                 int i = clock.get(k);
-                if (m.escaped() || !m.hash().equals(first[i].hash())) moves[i] = true;
+                // A picture that isn't the layer's can't show it static; the sequence will tell what it is.
+                if (m.escaped() || !m.uncaptured().isEmpty() || !m.hash().equals(first[i].hash())) moves[i] = true;
             }
         }
         for (int i : clock) if (!moves[i]) clockStatic++;
@@ -304,7 +320,7 @@ final class RecipeJob {
         boolean check = frame % CHECK_EVERY == 0;
         int[] layers = check ? animated : open();
         List<TileRenderer.Tile> tiles = new ArrayList<>(layers.length);
-        for (int i : layers) tiles.add(new TileRenderer.Tile(boxes[i], plan.layers().get(i)::draw));
+        for (int i : layers) tiles.add(new TileRenderer.Tile(boxes[i], plan.layers().get(i)::draw, matte[i]));
         TileRenderer.Submission submission = submit(plan, tiles);
         // Now, before the next frame ticks the atlas away from this one.
         if (check) startReference(plan.millis());
@@ -333,7 +349,7 @@ final class RecipeJob {
                 fallBack("a layer escapes its box after frame 0", "frame " + frame.frame() + ", " + kind(i));
                 return false;
             }
-            if (!plainOver(m, i, frame.frame())) return false;
+            if (!usable(m, i, frame.frame())) return false;
             if (!loops[i].decided() && loops[i].offer(m.hash(), m::still)) undecided--;
             if (now != null) now[i] = m;
         }
@@ -348,7 +364,8 @@ final class RecipeJob {
     private void lastFrame() {
         if (!lastChecked) {
             List<TileRenderer.Tile> tiles = new ArrayList<>(animated.length);
-            for (int i : animated) tiles.add(new TileRenderer.Tile(boxes[i], lastPlan.layers().get(i)::draw));
+            for (int i : animated)
+                tiles.add(new TileRenderer.Tile(boxes[i], lastPlan.layers().get(i)::draw, matte[i]));
             TileRenderer.Submission submission = submit(lastPlan, tiles);
             startReference(lastPlan.millis());
             List<TileRenderer.Matted> drawn = collect(submission);
@@ -361,7 +378,7 @@ final class RecipeJob {
                     fallBack("a layer escapes its box after frame 0", "frame " + frame + ", " + kind(i));
                     return;
                 }
-                if (!plainOver(m, i, frame)) return;
+                if (!usable(m, i, frame)) return;
                 now[i] = m;
             }
             check(frame, now);
@@ -389,8 +406,16 @@ final class RecipeJob {
 
     // Checks.
 
-    /** Whether layer {@code i}'s picture is a plain "over"; falls back if not. */
-    private boolean plainOver(TileRenderer.Matted m, int i, int frame) {
+    /**
+     * Whether {@code m} is layer {@code i}'s picture and a plain "over"; falls back if not. A layer frame 0 found could
+     * be drawn once, but that blends in a way one draw can't capture later on, has no picture of that frame to go on.
+     */
+    private boolean usable(TileRenderer.Matted m, int i, int frame) {
+        if (!m.uncaptured().isEmpty()) {
+            fallBack("a layer drawn once blends in a way one draw can't capture", "frame " + frame + ", " + kind(i)
+                    + ", " + m.uncaptured());
+            return false;
+        }
         if (m.alphaSpread() <= Matte.MAX_ALPHA_SPREAD) return true;
         fallBack("a layer is not a plain \"over\"", "frame " + frame + ", " + kind(i) + ", alpha spread "
                 + m.alphaSpread());
@@ -668,5 +693,13 @@ final class RecipeJob {
 
     int clockStatic() {
         return clockStatic;
+    }
+
+    /**
+     * Per layer frame 0 had drawn over black and white, the blend states one draw can't capture that it used; also
+     * for a recipe that fell back after.
+     */
+    List<Set<BlendState>> matteBlends() {
+        return matteBlends;
     }
 }

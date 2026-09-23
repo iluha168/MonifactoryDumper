@@ -1,5 +1,6 @@
 package com.iluha168.monifactory.dumper;
 
+import com.iluha168.monifactory.faketime.FakeTime;
 import com.iluha168.monifactory.imgencoder.Frame;
 import com.iluha168.monifactory.imgencoder.layered.StillHash;
 import com.mojang.blaze3d.pipeline.RenderTarget;
@@ -24,10 +25,12 @@ import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -38,11 +41,17 @@ import java.util.function.Supplier;
  * Draws a recipe's layers as tiles of one offscreen target and hands back each layer's straight-alpha picture
  * (DESIGN 3.5).
  * <p>
- * A tile is a crop box of the recipe's canvas and something that draws. It is drawn twice, over opaque black and over
- * opaque white, each into its own region of the target: the box plus a 1-pixel guard ring on every side, cleared on
- * its own. What lands on the ring is how {@link Matte} tells that a layer escaped its box. Tiles are shelf-packed
- * ({@link TilePacking}) into power-of-two targets up to {@value #MAX_SIDE} square, several passes when they don't fit
- * one, and each pass is read back once, only the rectangle it used.
+ * A tile is a crop box of the recipe's canvas and something that draws. It is drawn once, over a transparent clear
+ * with its blending set up by {@link BlendState} before each of its draws, or, when the caller asks, twice, over
+ * opaque black and over opaque white (DESIGN 3.2). Each draw goes into its own region of the target: the box plus a
+ * 1-pixel guard ring on every side, cleared on its own. What lands on the ring is how {@link Matte} tells that a layer
+ * escaped its box. Tiles are shelf-packed ({@link TilePacking}) into power-of-two targets up to {@value #MAX_SIDE}
+ * square, several passes when they don't fit one, and each pass is read back once, only the rectangle it used.
+ * <p>
+ * A tile drawn once also says which blend states its draws used that one draw can't capture; its picture is only the
+ * layer's if there were none. The GL's blend state is the renderer's only while such a tile draws, between the
+ * game's asking for a state and the draw going out ({@link FakeTime#capture}); after the tile it is put back to what
+ * the game asked for, so the next layer starts from what it would in the real render.
  * <p>
  * Each draw goes to a scratch target the size of the canvas, with exactly the target size, viewport and transform
  * {@link RecipeRenderer} draws the whole recipe with, and then its box and ring are copied to the tile's region. So
@@ -90,8 +99,8 @@ final class TileRenderer implements AutoCloseable {
     private static final int POOL_PIXELS = 16_384;
 
     /**
-     * Wraps a tile's draw over black, the one the caller watches: it must run {@code draw} exactly once. The draw
-     * includes the flush, so what the layer sends to the GPU happens inside.
+     * Wraps a tile's first draw, the one the caller watches: it must run {@code draw} exactly once. The draw includes
+     * the flush, so what the layer sends to the GPU happens inside.
      */
     @FunctionalInterface
     interface Bracket {
@@ -99,18 +108,13 @@ final class TileRenderer implements AutoCloseable {
     }
 
     /**
-     * One tile: where on the canvas it is cut, in pixels, what draws it, and what brackets its draw over black, or
-     * null. The body draws with the recipe's transform set: GUI pixel (0, 0) is the card's corner, as for
-     * {@link LayerPlan.Layer#draw}.
+     * One tile: where on the canvas it is cut, in pixels, what draws it, whether over black and white instead of once,
+     * and what brackets its first draw, or null. The body draws with the recipe's transform set: GUI pixel (0, 0) is
+     * the card's corner, as for {@link LayerPlan.Layer#draw}.
      */
-    record Tile(LayerPlan.Box box, Consumer<GuiGraphics> body, Bracket black) {
-        Tile(LayerPlan.Box box, Consumer<GuiGraphics> body) {
-            this(box, body, null);
-        }
-
-        /** A layer of a plan, in its own box. */
-        static Tile of(LayerPlan.Layer layer) {
-            return new Tile(layer.box(), layer::draw);
+    record Tile(LayerPlan.Box box, Consumer<GuiGraphics> body, boolean matte, Bracket watch) {
+        Tile(LayerPlan.Box box, Consumer<GuiGraphics> body, boolean matte) {
+            this(box, body, matte, null);
         }
     }
 
@@ -119,10 +123,12 @@ final class TileRenderer implements AutoCloseable {
      *
      * @param still       the box's picture, straight alpha, top row first
      * @param escaped     whether the layer drew on the guard ring, outside its box
-     * @param alphaSpread how far the colour channels disagreed on alpha; see {@link Matte#MAX_ALPHA_SPREAD}
+     * @param alphaSpread how far the picture is from a plain "over"; see {@link Matte#MAX_ALPHA_SPREAD}
      * @param hash        the still's identity
+     * @param uncaptured  for a tile drawn once, the blend states it drew with that one draw can't capture: if any, the
+     *                    picture is not the layer's. Empty for a tile drawn over black and white.
      */
-    record Matted(Frame still, boolean escaped, int alphaSpread, StillHash hash) {
+    record Matted(Frame still, boolean escaped, int alphaSpread, StillHash hash, Set<BlendState> uncaptured) {
     }
 
     private final Minecraft minecraft;
@@ -151,12 +157,14 @@ final class TileRenderer implements AutoCloseable {
 
     /**
      * Draws {@code tiles} of {@code plan}'s canvas and queues their readback. Each tile's box must lie within the
-     * canvas; the ring around it may not. Run it inside {@link DrawTime} at the plan's time. If a body throws, the GL
-     * state is put back, and the submission before the last can no longer be collected: collect it first.
+     * canvas; the ring around it may not. Run it inside {@link DrawTime} at the plan's time: a tile drawn once is set
+     * up only on the frozen thread. If a body throws, the GL state is put back, and the submission before the last can
+     * no longer be collected: collect it first.
      */
     Submission submit(LayerPlan plan, List<Tile> tiles) {
         RenderSystem.assertOnRenderThread();
         if (closed) throw new IllegalStateException("the tile renderer is closed");
+        if (!FakeTime.isFrozen()) throw new IllegalStateException("drawing tiles that are not under DrawTime");
         int n = tiles.size();
         int[] widths = new int[n], heights = new int[n];
         for (int i = 0; i < n; i++) {
@@ -165,11 +173,11 @@ final class TileRenderer implements AutoCloseable {
                     || box.x() + box.width() > plan.width() || box.y() + box.height() > plan.height())
                 throw new IllegalArgumentException("tile " + i + " " + box + " is not inside the " + plan.width() + "x"
                         + plan.height() + " canvas");
-            // Black and white side by side: one shelf item, so the pair shares a pass and a row stride.
-            widths[i] = 2 * (box.width() + 2 * RING);
+            // A black and white pair side by side: one shelf item, so the two share a pass and a row stride.
+            widths[i] = (tiles.get(i).matte() ? 2 : 1) * (box.width() + 2 * RING);
             heights[i] = box.height() + 2 * RING;
         }
-        if (n == 0) return new Submission(-1, List.of(), new int[0], new int[0], 0);
+        if (n == 0) return new Submission(-1, List.of(), new int[0], new int[0], 0, List.of());
         TilePacking.Layout layout = TilePacking.pack(widths, heights, MAX_SIDE);
 
         int slot = turn;
@@ -188,31 +196,33 @@ final class TileRenderer implements AutoCloseable {
         if (bytes > Integer.MAX_VALUE) throw new IllegalArgumentException("a " + bytes + "-byte readback is too large");
 
         BlendDepth baseline = BlendDepth.read();
+        List<Set<BlendState>> uncaptured = new ArrayList<>(Collections.nCopies(n, Set.of()));
         for (int p = 0; p < passOffsets.length; p++) {
-            drawPass(plan, tiles, layout, p, slot, passOffsets[p], bytes, baseline);
+            drawPass(plan, tiles, layout, p, slot, passOffsets[p], bytes, baseline, uncaptured);
         }
         turn ^= 1;
-        int[] black = new int[n], stride = new int[n];
+        int[] first = new int[n], stride = new int[n];
         for (int i = 0; i < n; i++) {
             TilePacking.Place place = layout.places().get(i);
             int passWidth = layout.passes().get(place.pass()).width();
-            black[i] = passOffsets[place.pass()] + place.y() * passWidth + place.x();
+            first[i] = passOffsets[place.pass()] + place.y() * passWidth + place.x();
             stride[i] = passWidth;
         }
-        Submission submission = new Submission(slot, List.copyOf(tiles), black, stride, bytes);
+        Submission submission = new Submission(slot, List.copyOf(tiles), first, stride, bytes, uncaptured);
         submission.passes = passOffsets.length;
         holders[slot] = submission;
         return submission;
     }
 
     /**
-     * Draws pass {@code p}'s tiles into its target and reads the used rectangle into buffer {@code slot}: every black
-     * draw in submission order, then every white one, each run starting from {@code baseline}. So a layer's two draws
-     * both start from the state the layer before it left, as its one draw in the real render does, and nothing has to
-     * be put back between them.
+     * Draws pass {@code p}'s tiles into its target and reads the used rectangle into buffer {@code slot}: every tile's
+     * first draw, once or over black, in submission order, then every white one, each run starting from
+     * {@code baseline}. So each draw of a layer starts from the state the layer before it left, as its one draw in the
+     * real render does, and nothing has to be put back between them. What a tile drawn once used that one draw can't
+     * capture goes into {@code uncaptured} at its index.
      */
     private void drawPass(LayerPlan plan, List<Tile> tiles, TilePacking.Layout layout, int p, int slot, int offset,
-                          long bytes, BlendDepth baseline) {
+                          long bytes, BlendDepth baseline, List<Set<BlendState>> uncaptured) {
         TilePacking.Pass pass = layout.passes().get(p);
         RenderTarget target = targets.computeIfAbsent(
                 (long) slot << 62 | (long) pass.targetWidth() << 31 | pass.targetHeight(),
@@ -227,17 +237,21 @@ final class TileRenderer implements AutoCloseable {
         // behind for every draw after it.
         try {
             RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorting.ORTHOGRAPHIC_Z);
-            for (int white = 0; white < 2; white++) {
+            boolean anyMatte = false;
+            for (int i = 0; i < tiles.size(); i++) anyMatte |= layout.places().get(i).pass() == p && tiles.get(i).matte();
+            for (int white = 0; white < (anyMatte ? 2 : 1); white++) {
                 baseline.apply();
                 for (int i = 0; i < tiles.size(); i++) {
                     TilePacking.Place place = layout.places().get(i);
-                    if (place.pass() != p) continue;
                     Tile tile = tiles.get(i);
+                    if (place.pass() != p || white == 1 && !tile.matte()) continue;
                     int x = place.x() + white * (tile.box().width() + 2 * RING);
                     float grey = white;
-                    Runnable draw = () -> drawTile(canvas, target, plan, tile, x, place.y(), grey);
-                    if (white == 1 || tile.black() == null) draw.run();
-                    else tile.black().around(draw);
+                    Capture capture = tile.matte() ? null : new Capture();
+                    Runnable draw = () -> drawTile(canvas, target, plan, tile, x, place.y(), grey, capture);
+                    if (white == 1 || tile.watch() == null) draw.run();
+                    else tile.watch().around(draw);
+                    if (capture != null && !capture.uncaptured.isEmpty()) uncaptured.set(i, capture.uncaptured);
                 }
             }
             // The readback is of the pass's target, whatever a layer bound last.
@@ -261,13 +275,14 @@ final class TileRenderer implements AutoCloseable {
     }
 
     /**
-     * One draw of {@code tile} over grey level {@code grey}: into {@code canvas}, a target the size of the recipe's
-     * canvas, exactly as {@link RecipeRenderer} draws the whole recipe, then its box and ring copied to the region at
-     * ({@code x}, {@code y}) from {@code atlas}'s bottom left. Everything a layer could have changed on its way is set
-     * again, per draw: the framebuffer, the viewport, the scissor and the model-view.
+     * One draw of {@code tile} over grey level {@code grey}, alpha 1: into {@code canvas}, a target the size of the
+     * recipe's canvas, exactly as {@link RecipeRenderer} draws the whole recipe, then its box and ring copied to the
+     * region at ({@code x}, {@code y}) from {@code atlas}'s bottom left. Everything a layer could have changed on its
+     * way is set again, per draw: the framebuffer, the viewport, the scissor and the model-view. With a
+     * {@code capture}, the draw is a tile's only one, and its clear, black with alpha 1, is transmittance 1.
      */
     private void drawTile(RenderTarget canvas, RenderTarget atlas, LayerPlan plan, Tile tile, int x, int y,
-                          float grey) {
+                          float grey, Capture capture) {
         LayerPlan.Box box = tile.box();
         int w = box.width() + 2 * RING, h = box.height() + 2 * RING;
         // The region on the canvas, ring included, in GL's rows from the bottom; and the part of it on the canvas.
@@ -291,8 +306,21 @@ final class TileRenderer implements AutoCloseable {
         RenderSystem.applyModelViewMatrix();
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
         GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
-        tile.body().accept(graphics);
-        graphics.flush();
+        if (capture == null) {
+            tile.body().accept(graphics);
+            graphics.flush();
+        } else {
+            // Set up for the state the tile starts in too, for a draw that goes to the GL past GlStateManager.
+            FakeTime.blend(Capture::apply);
+            FakeTime.capture(capture);
+            try {
+                tile.body().accept(graphics);
+                graphics.flush();
+            } finally {
+                FakeTime.capture(null);
+                FakeTime.blend(TileRenderer::restore);
+            }
+        }
 
         // A blit is clipped by the scissor, and a layer may have left one on.
         RenderSystem.disableScissor();
@@ -333,6 +361,43 @@ final class TileRenderer implements AutoCloseable {
         body.run();
         if (!all) RenderSystem.colorMask(colour[0], colour[1], colour[2], colour[3]);
         if (!depth) RenderSystem.depthMask(false);
+    }
+
+    /**
+     * Sets up each draw of a tile drawn once (see {@link BlendState}), and keeps the blend states it met that one draw
+     * can't capture. One per tile draw.
+     */
+    private static final class Capture implements FakeTime.Blend {
+        final Set<BlendState> uncaptured = new HashSet<>(2);
+
+        @Override
+        public void state(boolean on, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, int equation, int colorMask,
+                          boolean logicOp) {
+            BlendState state = BlendState.of(on, srcRgb, dstRgb, equation, colorMask, logicOp);
+            if (!state.oneDraw()) uncaptured.add(state);
+            set(state);
+        }
+
+        /** Sets the GL up for a draw with the state asked for, straight past GlStateManager, whose cache keeps it. */
+        static void apply(boolean on, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, int equation, int colorMask,
+                          boolean logicOp) {
+            set(BlendState.of(on, srcRgb, dstRgb, equation, colorMask, logicOp));
+        }
+
+        private static void set(BlendState state) {
+            GL11.glEnable(GL11.GL_BLEND);
+            GL14.glBlendFuncSeparate(state.captureSrc(), state.captureDst(), GL11.GL_ZERO, state.captureDst());
+            GL14.glBlendEquation(GL14.GL_FUNC_ADD);
+        }
+    }
+
+    /** Puts the GL's blend state back to what the game asked for, which GlStateManager's cache holds. */
+    private static void restore(boolean on, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, int equation,
+                                int colorMask, boolean logicOp) {
+        if (on) GL11.glEnable(GL11.GL_BLEND);
+        else GL11.glDisable(GL11.GL_BLEND);
+        GL14.glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+        GL14.glBlendEquation(equation);
     }
 
     /**
@@ -398,19 +463,22 @@ final class TileRenderer implements AutoCloseable {
     final class Submission {
         private final int slot;
         private final List<Tile> tiles;
-        /** Per tile, the int offset of its black draw in the buffer; the white one is right of it. */
-        private final int[] black;
+        /** Per tile, the int offset of its first draw in the buffer; a white one is right of it. */
+        private final int[] first;
         private final int[] stride;
         private final long bytes;
+        private final List<Set<BlendState>> uncaptured;
         private int passes;
         private boolean collected, stale;
 
-        private Submission(int slot, List<Tile> tiles, int[] black, int[] stride, long bytes) {
+        private Submission(int slot, List<Tile> tiles, int[] first, int[] stride, long bytes,
+                           List<Set<BlendState>> uncaptured) {
             this.slot = slot;
             this.tiles = tiles;
-            this.black = black;
+            this.first = first;
             this.stride = stride;
             this.bytes = bytes;
+            this.uncaptured = uncaptured;
         }
 
         /** How many targets the batch took: one unless its tiles didn't fit {@value #MAX_SIDE} square. */
@@ -444,13 +512,16 @@ final class TileRenderer implements AutoCloseable {
                 for (int small = 0; small < 2; small++) {
                     for (int i = 0; i < tiles.size(); i++) {
                         LayerPlan.Box box = tiles.get(i).box();
-                        int from = black[i], rowStride = stride[i];
+                        boolean matte = tiles.get(i).matte();
+                        int from = first[i], rowStride = stride[i];
                         int w = box.width() + 2 * RING, h = box.height() + 2 * RING;
                         if ((w * h < POOL_PIXELS) != (small == 1)) continue;
+                        Set<BlendState> blends = uncaptured.get(i);
                         Supplier<Matted> solve = () -> {
-                            Matte.Result result = Matte.solve(pixels, from, from + w, rowStride, w, h);
+                            Matte.Result result = matte ? Matte.solve(pixels, from, from + w, rowStride, w, h)
+                                    : Matte.unpremultiply(pixels, from, rowStride, w, h);
                             return new Matted(result.still(), result.escaped(), result.alphaSpread(),
-                                    StillHash.of(result.still()));
+                                    StillHash.of(result.still()), blends);
                         };
                         if (small == 0) {
                             work.set(i, CompletableFuture.supplyAsync(solve, executor));
