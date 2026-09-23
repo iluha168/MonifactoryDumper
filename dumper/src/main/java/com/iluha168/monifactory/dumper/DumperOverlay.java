@@ -132,6 +132,7 @@ final class DumperOverlay extends Overlay {
                         case SEQ -> Seq.choose(minecraft, corpus, job.output(), job.seed(), job.count())::advance;
                         default -> throw new IllegalStateException("no work for " + job.mode());
                     };
+                    ClientTicks.freeze(minecraft);
                     return Step.RENDER;
                 }
                 // Before the batch rather than when meta.json is written, so a version that disagrees with the manifest
@@ -152,6 +153,7 @@ final class DumperOverlay extends Overlay {
                     default -> throw new IllegalStateException("no work for " + job.mode());
                 };
                 corpus = null;
+                if (job.mode().renders()) ClientTicks.freeze(minecraft);
                 return Step.RENDER;
             }
             case RENDER -> {
