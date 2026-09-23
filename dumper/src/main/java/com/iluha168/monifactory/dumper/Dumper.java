@@ -56,6 +56,11 @@ public final class Dumper {
         /** Raw frame-hash sequences of a sample, for checking the detection rules offline, see {@link Seq}. */
         SEQ;
 
+        /** Whether the run draws anything. Every mode but {@link #DATA} does. */
+        boolean renders() {
+            return this != DATA;
+        }
+
         /** Whether the run writes meta.json, and so needs to know the pack's version and mode. */
         boolean describesPack() {
             return this == DUMP || this == DATA;

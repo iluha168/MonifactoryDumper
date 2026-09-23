@@ -41,6 +41,8 @@ final class DumperOverlay extends Overlay {
 
     private Step step = Step.BOOT;
     private CompletableFuture<DataPlane.Server> serverReload;
+    /** The server side, until EMI has read what it synced; see {@link ServerLeftovers}. */
+    private DataPlane.Server server;
     private long serverReloadSince, emiSince;
     private Corpus corpus;
     /** Asked once a frame until FancyMenu has read the version, see {@link Pack}. */
@@ -98,8 +100,9 @@ final class DumperOverlay extends Overlay {
                     }
                     return Step.SERVER_RELOAD;
                 }
-                DataPlane.joinAndSync(minecraft, serverReload.join());
+                server = serverReload.join();
                 serverReload = null;
+                DataPlane.joinAndSync(minecraft, server);
                 emiSince = System.currentTimeMillis();
                 LOG.info("[dumper] recipes and tags synced; waiting for EMI's reload");
                 return Step.EMI;
@@ -116,6 +119,11 @@ final class DumperOverlay extends Overlay {
                     return Step.EMI;
                 }
                 LOG.info("[dumper] EMI loaded in {} ms", System.currentTimeMillis() - emiSince);
+                // Nothing reads the server side from here on. A run that renders holds the rest of the heap for the
+                // length of the batch; the data mode writes its file and exits.
+                if (job.mode().renders()) ServerLeftovers.release(server);
+                server = null;
+                if (job.mode().renders()) ServerLeftovers.collect();
                 corpus = Corpus.of(EmiApi.getRecipeManager());
                 if (!job.mode().describesPack()) {
                     work = switch (job.mode()) {
