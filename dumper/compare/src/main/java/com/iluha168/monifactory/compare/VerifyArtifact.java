@@ -1,48 +1,46 @@
 package com.iluha168.monifactory.compare;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.iluha168.monifactory.imgencoder.PakEntry;
-import com.iluha168.monifactory.imgencoder.PakReader;
+import com.iluha168.monifactory.imgencoder.layered.Layer;
+import com.iluha168.monifactory.imgencoder.layered.LayeredImage;
+import com.iluha168.monifactory.imgencoder.layered.StillEntry;
+import com.iluha168.monifactory.imgencoder.layered.StillTable;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Checks that an artifact directory is whole (PLAN M5): every {@code recipes.json} entry names a payload in
- * {@code images.pak}, and every payload decodes to the picture the entry describes.
+ * Checks that a format 2 artifact directory is whole (DESIGN section 4): every picture a record describes can be
+ * drawn from what the artifact holds.
  * <p>
- * Per entry: {@code frames}, {@code bytes} and {@code offset} are set; the payloads tile {@code images.pak} in record
- * order with no gap, overlap or trailing byte; the payload decodes in full, a still for one frame and an animation
- * otherwise; the picture is {@code (w + 8) * scale} by {@code (h + 8) * scale}; and an animation loops forever and
- * runs {@code frames} times the frame length. {@code meta.json}, when there is one, must agree on the record count.
+ * The stills: {@code stills.json} tiles {@code stills.pak} exactly, from 0 to its last byte, and every still decodes
+ * as a single WebP image of the size its row gives. The records: every non-null {@code "image"} obeys DESIGN 2.1,
+ * which reading it through {@link Artifact#image} checks (still ids exist, the stills of a layer share a size, every
+ * box lies inside the canvas, every duration is positive, there is a layer 0), and its canvas is
+ * {@code (w + 8) * scale} by {@code (h + 8) * scale} for the record's display size. And {@code meta.json} agrees with
+ * both: the recipe and still counts, the pak's size, and {@code layered + fallback + failed == recipes}, where a
+ * failed record is one whose image is null.
  * <p>
- * A data-only artifact, whose {@code meta.json} says {@code "images": false}, has no {@code images.pak}. For it every
- * entry must parse and have {@code frames}, {@code bytes} and {@code offset} all null, and there must be no pak.
+ * A data-only artifact, whose {@code meta.json} says {@code "images": false}, has no {@code stills.*}, null image
+ * fields in its meta, and {@code "image": null} in every record.
+ * <p>
+ * A format 1 artifact is refused as a whole: it has nothing this checks.
  * <p>
  * Usage: {@code --artifact <dir> [--threads <n>]}. Exits 1 on any failure and lists the first few.
  */
 public final class VerifyArtifact {
     /** EMI's screenshot padding, in GUI pixels, which the picture adds to the display size. */
     static final int PADDING = 8;
-    /** One animation frame is one atlas tick. meta.json says so too; this is the value when it is absent. */
-    static final int FRAME_MILLIS = 50;
-
-    record Entry(int index, String name, int width, int height, Integer frames, Integer bytes, Long offset) {
-    }
 
     public static void main(String[] args) throws Exception {
         Map<String, String> options = new TreeMap<>();
@@ -50,169 +48,154 @@ public final class VerifyArtifact {
         Path artifact = Path.of(Objects.requireNonNull(options.get("artifact"), "--artifact <dir>"));
         int threads = Integer.parseInt(options.getOrDefault("threads",
                 Integer.toString(Math.max(1, Runtime.getRuntime().availableProcessors() - 2))));
-        System.exit(verify(artifact, threads) == 0 ? 0 : 1);
+        System.exit(verify(artifact, threads).isEmpty() ? 0 : 1);
     }
 
-    static int verify(Path artifact, int threads) throws Exception {
+    /** Checks {@code directory}, prints a summary, and returns every problem found, none for a whole artifact. */
+    static List<String> verify(Path directory, int threads) throws IOException, InterruptedException {
         long started = System.nanoTime();
-        JsonObject meta = null;
-        Path metaFile = artifact.resolve("meta.json");
-        if (Files.isRegularFile(metaFile)) {
-            meta = JsonParser.parseString(Files.readString(metaFile, StandardCharsets.UTF_8)).getAsJsonObject();
-        }
-        // A data-only artifact has both, as nulls, since it has no images for them to describe.
-        int frameMillis = has(meta, "frameMillis") ? meta.get("frameMillis").getAsInt() : FRAME_MILLIS;
-        Integer scale = has(meta, "scale") ? meta.get("scale").getAsInt() : null;
-
-        List<Entry> entries = load(artifact.resolve("recipes.json"));
         List<String> failures = new ArrayList<>();
-        if (meta != null && meta.get("recipes").getAsInt() != entries.size()) {
-            failures.add("meta.json counts " + meta.get("recipes").getAsInt() + " recipes, recipes.json holds "
-                    + entries.size());
+        try (Artifact artifact = Artifact.open(directory)) {
+            if (artifact.images()) verifyImages(artifact, threads, failures);
+            else verifyData(artifact, failures);
+            long seconds = (System.nanoTime() - started) / 1_000_000_000L;
+            System.out.println("checked in " + seconds + " s; meta.json: " + artifact.meta);
+        } catch (IOException e) {
+            // Not an artifact these tools can read at all, or it lost a file on the way.
+            failures.add(e.getMessage());
         }
+        if (failures.isEmpty()) {
+            System.out.println("OK: every record's picture can be drawn from the artifact's stills");
+        } else {
+            System.out.println("FAILED: " + failures.size() + " problems; the first few:");
+            failures.stream().limit(20).forEach(failure -> System.out.println("  " + failure));
+        }
+        return failures;
+    }
 
-        Path pakFile = artifact.resolve("images.pak");
-        if (meta != null && meta.has("images") && !meta.get("images").getAsBoolean()) {
-            return verifyData(artifact, meta, entries, failures, started);
+    private static void verifyImages(Artifact artifact, int threads, List<String> failures)
+            throws IOException, InterruptedException {
+        StillTable table = artifact.stills;
+        long pakSize = artifact.pak.size();
+        if (pakSize != table.bytes()) {
+            failures.add(StillTable.PAK + " is " + pakSize + " B, " + StillTable.JSON + " covers " + table.bytes()
+                    + " B of it");
         }
-        long pakSize = Files.size(pakFile);
-        long end = 0;
-        for (Entry entry : entries) {
-            if (entry.frames() == null || entry.bytes() == null || entry.offset() == null) {
-                failures.add(entry.name() + ": no image (frames/bytes/offset are null)");
-                continue;
-            }
-            if (entry.offset() != end) {
-                failures.add(entry.name() + ": offset " + entry.offset() + ", but the previous payload ends at " + end);
-            }
-            if (entry.bytes() <= 0 || entry.frames() <= 0) {
-                failures.add(entry.name() + ": " + entry.frames() + " frames in " + entry.bytes() + " B");
-            }
-            end = Math.max(end, entry.offset() + entry.bytes());
-        }
-        if (end != pakSize) {
-            failures.add("images.pak is " + pakSize + " B, the entries cover " + end + " B of it");
-        }
+        Long scale = artifact.metaNumber("scale");
+        if (scale == null || scale < 1) failures.add("meta.json has images but scale " + scale);
 
-        long[] kinds = new long[2];
-        AtomicLong animationFrames = new AtomicLong();
+        int[] counts = new int[3]; // records, with an image, of those animated
+        int[] layers = new int[2]; // all, animated
+        BitSet referenced = new BitSet(table.size());
+        artifact.records((index, record) -> {
+            counts[0]++;
+            LayeredImage image;
+            try {
+                image = artifact.image(record);
+            } catch (IllegalArgumentException e) {
+                failures.add(Artifact.name(index, record) + ": " + e.getMessage());
+                // It claims a picture, so the meta counts should too; only the picture is wrong.
+                if (record.has("image") && !record.get("image").isJsonNull()) counts[1]++;
+                return;
+            }
+            if (image == null) return;
+            counts[1]++;
+            if (image.animated()) counts[2]++;
+            for (Layer layer : image.layers()) {
+                layers[0]++;
+                if (layer.loop().animated()) layers[1]++;
+                for (int i = 0; i < layer.loop().size(); i++) referenced.set(layer.loop().still(i));
+            }
+            if (scale == null) return;
+            if (!record.has("w") || !record.has("h")) {
+                failures.add(Artifact.name(index, record) + ": no display size (w, h) to check the canvas against");
+                return;
+            }
+            int w = record.get("w").getAsInt(), h = record.get("h").getAsInt();
+            long width = (w + PADDING) * scale, height = (h + PADDING) * scale;
+            if (image.width() != width || image.height() != height) {
+                failures.add(Artifact.name(index, record) + ": a " + image.width() + "x" + image.height()
+                        + " canvas, expected " + width + "x" + height + " for a " + w + "x" + h + " recipe at scale "
+                        + scale);
+            }
+        });
+        checkCounts(artifact, failures, counts[0], counts[1], table.size(), pakSize);
+
         ExecutorService pool = Executors.newFixedThreadPool(threads);
-        try (PakReader pak = PakReader.open(pakFile)) {
-            List<Future<String>> checks = new ArrayList<>(entries.size());
-            for (Entry entry : entries) {
-                if (entry.frames() == null || entry.bytes() == null || entry.offset() == null) continue;
-                if (entry.bytes() <= 0 || entry.offset() + entry.bytes() > pakSize) {
-                    failures.add(entry.name() + ": " + entry.bytes() + " B at " + entry.offset()
-                            + " is not inside images.pak");
-                    continue;
-                }
-                kinds[entry.frames() == 1 ? 0 : 1]++;
+        try {
+            List<Future<String>> checks = new ArrayList<>(table.size());
+            for (int id = 0; id < table.size(); id++) {
+                int still = id;
                 checks.add(pool.submit(() -> {
-                    WebpFile file;
                     try {
-                        file = WebpFile.decode(pak.read(new PakEntry(entry.offset(), entry.bytes())));
+                        artifact.still(still);
+                        return null;
                     } catch (IOException e) {
-                        return entry.name() + ": " + e.getMessage();
+                        StillEntry entry = table.get(still);
+                        return "still " + still + " (" + entry.payload().length() + " B at " + entry.payload().offset()
+                                + "): " + e.getMessage();
                     }
-                    int step = scale != null ? scale : Math.max(1, file.width() / (entry.width() + PADDING));
-                    int width = (entry.width() + PADDING) * step, height = (entry.height() + PADDING) * step;
-                    if (file.width() != width || file.height() != height) {
-                        return entry.name() + ": " + file.width() + "x" + file.height() + ", expected " + width + "x"
-                                + height + " at scale " + step;
-                    }
-                    if (entry.frames() == 1) {
-                        return file.animated() ? entry.name() + ": one frame, but the payload is an animation" : null;
-                    }
-                    if (!file.animated()) return entry.name() + ": " + entry.frames() + " frames, but a still";
-                    animationFrames.addAndGet(file.frames());
-                    if (file.loops() != 0) return entry.name() + ": loops " + file.loops() + " times, not forever";
-                    if (file.frames() > entry.frames()) {
-                        return entry.name() + ": " + file.frames() + " stored frames for " + entry.frames() + " frames";
-                    }
-                    if (file.durationMillis() != (long) entry.frames() * frameMillis) {
-                        return entry.name() + ": runs " + file.durationMillis() + " ms, expected " + entry.frames()
-                                + " x " + frameMillis + " ms";
-                    }
-                    return null;
                 }));
             }
             for (Future<String> check : checks) {
-                String failure = check.get();
+                String failure;
+                try {
+                    failure = check.get();
+                } catch (ExecutionException e) {
+                    failure = "a still check threw " + e.getCause();
+                }
                 if (failure != null) failures.add(failure);
             }
         } finally {
             pool.shutdown();
         }
-
-        long seconds = (System.nanoTime() - started) / 1_000_000_000L;
-        System.out.printf("%s: %,d recipes, %,d stills and %,d animations (%,d stored frames), images.pak %,d B;"
-                        + " checked in %d s on %d threads%n", artifact, entries.size(), kinds[0], kinds[1],
-                animationFrames.get(), pakSize, seconds, threads);
-        if (meta != null) System.out.println("meta.json: " + meta);
-        if (failures.isEmpty()) {
-            System.out.println("OK: every entry resolves to a decodable image of its recipe's size");
-            return 0;
-        }
-        System.out.println("FAILED: " + failures.size() + " problems; the first few:");
-        failures.stream().limit(20).forEach(failure -> System.out.println("  " + failure));
-        return failures.size();
+        System.out.printf("%s: %,d recipes, %,d with a picture (%,d animated) in %,d layers (%,d animated);"
+                        + " %,d stills (%,d referenced by no record) in %,d B; %d threads%n", artifact.directory,
+                counts[0], counts[1], counts[2], layers[0], layers[1], table.size(),
+                table.size() - referenced.get(0, table.size()).cardinality(), pakSize, threads);
     }
 
-    private static int verifyData(Path artifact, JsonObject meta, List<Entry> entries, List<String> failures,
-                                  long started) {
-        if (Files.exists(artifact.resolve("images.pak"))) {
-            failures.add("meta.json says the artifact has no images, but there is an images.pak");
+    /** meta.json against what the artifact holds. {@code rendered} records have a picture; the rest failed. */
+    private static void checkCounts(Artifact artifact, List<String> failures, int records, int rendered, int stills,
+                                    long pakSize) {
+        expect(artifact, failures, "recipes", records, "recipes.json holds " + records + " records");
+        expect(artifact, failures, "failed", records - rendered, (records - rendered) + " records have no picture");
+        expect(artifact, failures, "stills", stills, StillTable.JSON + " lists " + stills + " stills");
+        expect(artifact, failures, "stillsBytes", pakSize, StillTable.PAK + " is " + pakSize + " B");
+        Long layered = artifact.metaNumber("layered"), fallback = artifact.metaNumber("fallback");
+        if (layered == null || fallback == null || layered < 0 || fallback < 0 || layered + fallback != rendered) {
+            failures.add("meta.json counts " + layered + " layered and " + fallback + " fallback recipes, but "
+                    + rendered + " records have a picture");
         }
-        if (has(meta, "imagesBytes")) failures.add("meta.json has no images, but imagesBytes is set");
-        for (Entry entry : entries) {
-            if (entry.frames() != null || entry.bytes() != null || entry.offset() != null) {
-                failures.add(entry.name() + ": has an image (" + entry.frames() + " frames, " + entry.bytes() + " B at "
-                        + entry.offset() + ") in an artifact without images");
+    }
+
+    private static void expect(Artifact artifact, List<String> failures, String key, long actual, String what) {
+        Long claimed = artifact.metaNumber(key);
+        if (claimed == null || claimed != actual) failures.add("meta.json says " + key + " " + claimed + ", " + what);
+    }
+
+    private static void verifyData(Artifact artifact, List<String> failures) throws IOException {
+        for (String file : new String[]{StillTable.PAK, StillTable.JSON, "render.tsv"}) {
+            if (Files.exists(artifact.directory.resolve(file))) {
+                failures.add("meta.json says the artifact has no images, but there is a " + file);
             }
         }
-        long seconds = (System.nanoTime() - started) / 1_000_000_000L;
-        System.out.printf("%s: %,d recipes, data only; checked in %d s%n", artifact, entries.size(), seconds);
-        System.out.println("meta.json: " + meta);
-        if (failures.isEmpty()) {
-            System.out.println("OK: every entry parses, and none claims an image");
-            return 0;
-        }
-        System.out.println("FAILED: " + failures.size() + " problems; the first few:");
-        failures.stream().limit(20).forEach(failure -> System.out.println("  " + failure));
-        return failures.size();
-    }
-
-    private static boolean has(JsonObject meta, String key) {
-        return meta != null && meta.has(key) && !meta.get(key).isJsonNull();
-    }
-
-    static List<Entry> load(Path file) throws IOException {
-        List<Entry> entries = new ArrayList<>();
-        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            for (String line; (line = reader.readLine()) != null; ) {
-                line = line.strip();
-                if (line.equals("[") || line.equals("]") || line.isEmpty()) continue;
-                if (line.endsWith(",")) line = line.substring(0, line.length() - 1);
-                JsonObject json = JsonParser.parseString(line).getAsJsonObject();
-                int index = entries.size();
-                String id = string(json, "emiRecipeId");
-                if (id == null) id = string(json, "underlyingRecipeId");
-                String name = "#" + index + " " + (id == null ? "" : id + " ") + "(" + string(json, "cat") + ")";
-                entries.add(new Entry(index, name, json.get("w").getAsInt(), json.get("h").getAsInt(),
-                        integer(json, "frames"), integer(json, "bytes"),
-                        json.get("offset").isJsonNull() ? null : json.get("offset").getAsLong()));
+        for (String key : new String[]{"stills", "stillsBytes", "layered", "fallback", "scale"}) {
+            if (artifact.metaNumber(key) != null) {
+                failures.add("meta.json says the artifact has no images, but " + key + " is set");
             }
         }
-        return entries;
-    }
-
-    private static Integer integer(JsonObject json, String key) {
-        JsonElement value = json.get(key);
-        return value == null || value.isJsonNull() ? null : value.getAsInt();
-    }
-
-    private static String string(JsonObject json, String key) {
-        JsonElement value = json.get(key);
-        return value == null || value.isJsonNull() ? null : value.getAsString();
+        int[] records = {0};
+        artifact.records((index, record) -> {
+            records[0]++;
+            try {
+                // With no still table, anything but "image": null throws.
+                artifact.image(record);
+            } catch (IllegalArgumentException e) {
+                failures.add(Artifact.name(index, record) + ": " + e.getMessage());
+            }
+        });
+        expect(artifact, failures, "recipes", records[0], "recipes.json holds " + records[0] + " records");
+        System.out.printf("%s: %,d recipes, data only%n", artifact.directory, records[0]);
     }
 }

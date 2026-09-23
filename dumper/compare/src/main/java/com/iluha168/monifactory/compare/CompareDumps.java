@@ -4,18 +4,18 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.iluha168.monifactory.imgencoder.PakEntry;
-import com.iluha168.monifactory.imgencoder.PakReader;
+import com.iluha168.monifactory.imgencoder.Frame;
+import com.iluha168.monifactory.imgencoder.layered.Layer;
+import com.iluha168.monifactory.imgencoder.layered.LayeredImage;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,9 +49,14 @@ import java.util.regex.Pattern;
  * </ul>
  * <p>
  * Records are paired by category, class and ids where a recipe has an id; recipes with neither id are paired by
- * category, class, size and content. Within a key, records with equal content pair first. Images are compared by their
- * payloads first; the encoder is deterministic, so equal pixels give equal bytes, and only payloads that differ are
- * decoded.
+ * category, class, size and content. Within a key, records with equal content pair first.
+ * <p>
+ * A picture is compared as its frame 0, composited from its layers (DESIGN 2.2), and it counts as animated when any
+ * layer shows more than one still. Still ids differ between two builds, since they follow what each build drew first,
+ * so two pictures are the same without decoding anything when their layers match box for box and timeline for
+ * timeline and every still they name has the same bytes on both sides. The encoder is deterministic, so equal pixels
+ * give equal bytes; only pictures that fail that are composited. Many recipes share stills (every card of a category
+ * is one), so each side keeps decoded stills in a bounded cache.
  * <p>
  * Usage: {@code --a <dir> --b <dir> [--out <tsv>]}. Exits 1 if anything is unexplained.
  */
@@ -78,10 +83,17 @@ public final class CompareDumps {
     static final int SLOT = 18;
     /** EMI's screenshot padding, in GUI pixels, which the image adds to the display size. */
     static final int PADDING = 8;
+    /** Decoded pixels each side keeps: 128 MiB, so both sides fit beside two corpora of records in the task's heap. */
+    static final long CACHED_PIXELS = 32L << 20;
 
     record Recipe(int index, String emiId, String underlyingId, String category, String cls, int width, int height,
                   String content, String unordered, String looseContent, boolean tag, boolean list, boolean nbt,
-                  Integer frames, Integer bytes, Long offset) {
+                  LayeredImage image) {
+        /** Drawn, and nothing in it moves. */
+        boolean still() {
+            return image != null && !image.animated();
+        }
+
         boolean flicker() {
             return (emiId != null && FLICKER.matcher(emiId).matches())
                     || (underlyingId != null && FLICKER.matcher(underlyingId).matches());
@@ -139,9 +151,24 @@ public final class CompareDumps {
         this.out = out;
     }
 
+    /** How many pairs of each kind, in the order the kinds were first seen. */
+    Map<String, Integer> counts() {
+        return counts;
+    }
+
+    /**
+     * Compares the two artifacts, prints what it found, and returns how many differences are not explained. Throws if
+     * either is not a readable format 2 artifact.
+     */
     int run() throws IOException {
+        try (Artifact artifactA = Artifact.open(a); Artifact artifactB = Artifact.open(b)) {
+            return run(new Stills(artifactA), new Stills(artifactB));
+        }
+    }
+
+    private int run(Stills stillsA, Stills stillsB) throws IOException {
         // Two samples drawn differently share almost no recipes, and every one of them would read as a regression.
-        String sampleA = sampling(a), sampleB = sampling(b);
+        String sampleA = sampling(stillsA.artifact), sampleB = sampling(stillsB.artifact);
         if (!sampleA.equals(sampleB) || sampleA.matches("every=(?!1 ).*")) {
             // every=N picks by position, and EMI's list drifts between boots, so two such samples hold different
             // recipes even when drawn alike. sample=N picks by what the recipe is.
@@ -149,10 +176,10 @@ public final class CompareDumps {
                     + sampleB + "); build both whole, or both with the same -Pmonifactory.dumper=sample=N");
             return 1;
         }
-        List<Recipe> left = load(a.resolve("recipes.json"));
-        List<Recipe> right = load(b.resolve("recipes.json"));
-        System.out.printf("A %s: %,d recipes, %s%n", a, left.size(), statics(left));
-        System.out.printf("B %s: %,d recipes, %s%n", b, right.size(), statics(right));
+        List<Recipe> left = load(stillsA.artifact);
+        List<Recipe> right = load(stillsB.artifact);
+        System.out.printf("A %s: %,d recipes, %s%n", a, left.size(), summary(left, stillsA.artifact));
+        System.out.printf("B %s: %,d recipes, %s%n", b, right.size(), summary(right, stillsB.artifact));
 
         Map<String, ArrayDeque<Recipe>> byKey = new LinkedHashMap<>();
         for (Recipe recipe : right) byKey.computeIfAbsent(recipe.key(), k -> new ArrayDeque<>()).add(recipe);
@@ -207,10 +234,7 @@ public final class CompareDumps {
         strayA.forEach(recipe -> onlyIn("A", recipe));
         onlyB.forEach(recipe -> onlyIn("B", recipe));
 
-        try (PakReader pakA = PakReader.open(a.resolve("images.pak"));
-             PakReader pakB = PakReader.open(b.resolve("images.pak"))) {
-            for (Recipe[] pair : pairs) compare(pair[0], pair[1], pakA, pakB);
-        }
+        for (Recipe[] pair : pairs) compare(pair[0], pair[1], stillsA, stillsB);
 
         System.out.printf("paired %,d recipes%n", pairs.size());
         counts.forEach((kind, n) -> System.out.printf("  %-34s %,d%n", kind, n));
@@ -229,23 +253,22 @@ public final class CompareDumps {
         return unexplained;
     }
 
-    /** How meta.json says the artifact was sampled, or "unknown" for one from before meta.json existed. */
-    static String sampling(Path artifact) throws IOException {
-        Path meta = artifact.resolve("meta.json");
-        if (!Files.isRegularFile(meta)) return "unknown";
-        JsonObject json = JsonParser.parseString(Files.readString(meta, StandardCharsets.UTF_8)).getAsJsonObject();
-        return "every=" + json.get("every") + " sample=" + json.get("sample") + " limit=" + json.get("limit");
+    /** How meta.json says the artifact was sampled. */
+    static String sampling(Artifact artifact) {
+        JsonObject meta = artifact.meta;
+        return "every=" + meta.get("every") + " sample=" + meta.get("sample") + " limit=" + meta.get("limit");
     }
 
-    private static String statics(List<Recipe> recipes) {
-        long count = 0, bytes = 0;
+    private static String summary(List<Recipe> recipes, Artifact artifact) {
+        long still = 0, animated = 0;
         for (Recipe recipe : recipes) {
-            if (recipe.frames() != null && recipe.frames() == 1) {
-                count++;
-                bytes += recipe.bytes();
-            }
+            if (recipe.still()) still++;
+            else if (recipe.image() != null) animated++;
         }
-        return String.format("%,d static, %,d B, mean %,d B", count, bytes, count == 0 ? 0 : bytes / count);
+        String stills = artifact.images() ? String.format("; %,d stills in %,d B", artifact.stills.size(),
+                artifact.stills.bytes()) : "; data only";
+        return String.format("%,d static, %,d animated, %,d without a picture%s", still, animated,
+                recipes.size() - still - animated, stills);
     }
 
     private void onlyIn(String side, Recipe recipe) {
@@ -253,7 +276,7 @@ public final class CompareDumps {
         record("only in " + side + ", " + why, recipe, "", why.equals("UNEXPLAINED"));
     }
 
-    private void compare(Recipe x, Recipe y, PakReader pakA, PakReader pakB) throws IOException {
+    private void compare(Recipe x, Recipe y, Stills stillsA, Stills stillsB) throws IOException {
         boolean sameContent = x.content().equals(y.content());
         // The same stacks in another order: a mod listed them out of a hash set, so which slot shows which moves.
         boolean reordered = !sameContent && x.unordered().equals(y.unordered());
@@ -264,38 +287,43 @@ public final class CompareDumps {
             boolean explained = x.flicker() || (x.varying() && y.varying());
             record(explained ? "content differs, varying slot" : "content differs, UNEXPLAINED", x, "", !explained);
         }
-        boolean staticX = x.frames() != null && x.frames() == 1, staticY = y.frames() != null && y.frames() == 1;
+        boolean staticX = x.still(), staticY = y.still();
         if (!staticX && !staticY) {
-            count(x.frames() == null && y.frames() == null ? "both not rendered (animated)" : "both animated", x);
+            count(x.image() == null && y.image() == null ? "both not rendered" : "both animated", x);
             return;
         }
         if (staticX != staticY) {
             // Static in one build and animated in the other: what one slot shows decided whether anything moved.
             boolean explained = x.varying() || y.varying();
             record(explained ? "static in one only, varying slot" : "static in one only, UNEXPLAINED", x,
-                    "A frames=" + x.frames() + " B frames=" + y.frames(), !explained);
+                    "A " + describe(x) + ", B " + describe(y), !explained);
             return;
         }
-        byte[] imageX = pakA.read(new PakEntry(x.offset(), x.bytes()));
-        byte[] imageY = pakB.read(new PakEntry(y.offset(), y.bytes()));
-        if (Arrays.equals(imageX, imageY)) {
+        if (sameStills(x.image(), stillsA, y.image(), stillsB)) {
             count("static, identical", x);
             return;
         }
-        BufferedImage pictureX = ImageIO.read(new ByteArrayInputStream(imageX));
-        BufferedImage pictureY = ImageIO.read(new ByteArrayInputStream(imageY));
-        if (pictureX == null || pictureY == null) {
-            record("static, UNDECODABLE", x, "", true);
+        Frame pictureX, pictureY;
+        try {
+            pictureX = x.image().frameAt(0, stillsA::frame);
+            pictureY = y.image().frameAt(0, stillsB::frame);
+        } catch (UncheckedIOException | IllegalStateException e) {
+            record("static, UNDECODABLE", x, e.getMessage(), true);
             return;
         }
-        if (pictureX.getWidth() != pictureY.getWidth() || pictureX.getHeight() != pictureY.getHeight()) {
-            record("static, size differs, UNEXPLAINED", x, pictureX.getWidth() + "x" + pictureX.getHeight() + " vs "
-                    + pictureY.getWidth() + "x" + pictureY.getHeight(), true);
+        if (pictureX.samePixels(pictureY)) {
+            // Layered in one build and drawn whole in the other, or cut into layers another way, to the same picture.
+            count("static, same picture from other layers", x);
             return;
         }
-        int width = pictureX.getWidth(), height = pictureX.getHeight();
-        int[] px = pictureX.getRGB(0, 0, width, height, null, 0, width);
-        int[] py = pictureY.getRGB(0, 0, width, height, null, 0, width);
+        if (pictureX.width() != pictureY.width() || pictureX.height() != pictureY.height()) {
+            record("static, size differs, UNEXPLAINED", x, pictureX.width() + "x" + pictureX.height() + " vs "
+                    + pictureY.width() + "x" + pictureY.height(), true);
+            return;
+        }
+        int width = pictureX.width(), height = pictureX.height();
+        int[] px = pictureX.argb();
+        int[] py = pictureY.argb();
         int scale = Math.max(1, width / (x.width() + PADDING));
         List<int[]> regions = regions(px, py, width, height);
         int slot = SLOT * scale;
@@ -328,6 +356,81 @@ public final class CompareDumps {
             bad = true;
         }
         record(kind, x, regions.size() + " regions, largest " + largest + " px: " + detail.toString().trim(), bad);
+    }
+
+    private static String describe(Recipe recipe) {
+        if (recipe.image() == null) return "no picture";
+        int animated = 0;
+        for (Layer layer : recipe.image().layers()) if (layer.loop().animated()) animated++;
+        return recipe.image().layers().size() + " layers, " + animated + " animated";
+    }
+
+    /**
+     * Whether {@code x} and {@code y} are the same picture by construction: the same canvas, the same boxes and
+     * timelines layer for layer, and stills with the same bytes wherever their ids differ.
+     */
+    private static boolean sameStills(LayeredImage x, Stills stillsX, LayeredImage y, Stills stillsY)
+            throws IOException {
+        if (x.width() != y.width() || x.height() != y.height() || x.layers().size() != y.layers().size()) return false;
+        for (int i = 0; i < x.layers().size(); i++) {
+            Layer lx = x.layers().get(i), ly = y.layers().get(i);
+            if (lx.x() != ly.x() || lx.y() != ly.y() || lx.width() != ly.width() || lx.height() != ly.height()
+                    || lx.loop().size() != ly.loop().size()) return false;
+            for (int k = 0; k < lx.loop().size(); k++) {
+                if (lx.loop().ticks(k) != ly.loop().ticks(k)) return false;
+                if (!Arrays.equals(stillsX.digest(lx.loop().still(k)), stillsY.digest(ly.loop().still(k)))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * One artifact's stills as the comparison needs them: a digest of each one's bytes, worked out once, and decoded
+     * pixels, kept while they fit in {@link #CACHED_PIXELS} and dropped least recently used first.
+     */
+    private static final class Stills {
+        final Artifact artifact;
+        private final byte[][] digests;
+        private final LinkedHashMap<Integer, Frame> decoded = new LinkedHashMap<>(1024, 0.75f, true);
+        private final MessageDigest sha;
+        private long pixels;
+
+        Stills(Artifact artifact) {
+            this.artifact = artifact;
+            this.digests = new byte[artifact.images() ? artifact.stills.size() : 0][];
+            try {
+                sha = MessageDigest.getInstance("SHA-256");
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("every JVM has SHA-256", e);
+            }
+        }
+
+        byte[] digest(int id) throws IOException {
+            if (digests[id] == null) digests[id] = sha.digest(artifact.stillBytes(id));
+            return digests[id];
+        }
+
+        /** Still {@code id}, decoded; unchecked, since {@link LayeredImage#frameAt} takes a plain function. */
+        Frame frame(int id) {
+            Frame still = decoded.get(id);
+            if (still != null) return still;
+            try {
+                still = artifact.still(id);
+            } catch (IOException e) {
+                throw new UncheckedIOException("still " + id + " of " + artifact.directory + ": " + e.getMessage(), e);
+            }
+            decoded.put(id, still);
+            pixels += still.argb().length;
+            for (Iterator<Frame> it = decoded.values().iterator(); pixels > CACHED_PIXELS && it.hasNext(); ) {
+                Frame eldest = it.next();
+                if (eldest == still) break;
+                pixels -= eldest.argb().length;
+                it.remove();
+            }
+            return still;
+        }
     }
 
     /**
@@ -381,37 +484,30 @@ public final class CompareDumps {
         if (bad) unexplained++;
     }
 
-    static List<Recipe> load(Path file) throws IOException {
+    static List<Recipe> load(Artifact artifact) throws IOException {
         List<Recipe> recipes = new ArrayList<>();
-        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            for (String line; (line = reader.readLine()) != null; ) {
-                line = line.strip();
-                if (line.equals("[") || line.equals("]") || line.isEmpty()) continue;
-                if (line.endsWith(",")) line = line.substring(0, line.length() - 1);
-                JsonObject json = JsonParser.parseString(line).getAsJsonObject();
-                boolean[] flags = new boolean[3];
-                StringBuilder content = new StringBuilder(), unordered = new StringBuilder(),
-                        loose = new StringBuilder();
-                for (String list : new String[]{"in", "cats", "out"}) {
-                    JsonElement stacks = json.get(list);
-                    content.append(list).append('=').append(canonical(stacks, flags, false)).append(';');
-                    unordered.append(list).append('=').append(sorted(stacks, false)).append(';');
-                    loose.append(list).append('=').append(sorted(stacks, true)).append(';');
-                }
-                recipes.add(new Recipe(recipes.size(), string(json, "emiRecipeId"), string(json, "underlyingRecipeId"),
-                        string(json, "cat"), string(json, "cls"), json.get("w").getAsInt(), json.get("h").getAsInt(),
-                        content.toString(), unordered.toString(), loose.toString(), flags[0], flags[1], flags[2],
-                        json.get("frames").isJsonNull() ? null : json.get("frames").getAsInt(),
-                        json.get("bytes").isJsonNull() ? null : json.get("bytes").getAsInt(),
-                        json.get("offset").isJsonNull() ? null : json.get("offset").getAsLong()));
+        artifact.records((index, json) -> {
+            boolean[] flags = new boolean[3];
+            StringBuilder content = new StringBuilder(), unordered = new StringBuilder(), loose = new StringBuilder();
+            for (String list : new String[]{"in", "cats", "out"}) {
+                JsonElement stacks = json.get(list);
+                content.append(list).append('=').append(canonical(stacks, flags, false)).append(';');
+                unordered.append(list).append('=').append(sorted(stacks, false)).append(';');
+                loose.append(list).append('=').append(sorted(stacks, true)).append(';');
             }
-        }
+            LayeredImage image;
+            try {
+                image = artifact.image(json);
+            } catch (IllegalArgumentException e) {
+                throw new IOException(artifact.directory + " " + Artifact.name(index, json) + ": " + e.getMessage()
+                        + "; run verifyArtifact on it", e);
+            }
+            recipes.add(new Recipe(index, Artifact.string(json, "emiRecipeId"),
+                    Artifact.string(json, "underlyingRecipeId"), Artifact.string(json, "cat"),
+                    Artifact.string(json, "cls"), json.get("w").getAsInt(), json.get("h").getAsInt(),
+                    content.toString(), unordered.toString(), loose.toString(), flags[0], flags[1], flags[2], image));
+        });
         return recipes;
-    }
-
-    private static String string(JsonObject json, String key) {
-        JsonElement value = json.get(key);
-        return value == null || value.isJsonNull() ? null : value.getAsString();
     }
 
     /** A stack list as {@link #canonical} text, its stacks sorted, so only which stacks are in it counts. */
@@ -437,7 +533,7 @@ public final class CompareDumps {
         }
         if (element.isJsonObject()) {
             JsonObject object = element.getAsJsonObject();
-            String kind = string(object, "k");
+            String kind = Artifact.string(object, "k");
             if ("t".equals(kind)) flags[0] = true;
             if ("m".equals(kind)) flags[1] = true;
             if (object.has("nbt") && object.get("nbt").isJsonPrimitive() && object.get("nbt").getAsInt() == 1) {

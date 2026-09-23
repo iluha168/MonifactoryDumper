@@ -19,6 +19,14 @@ dependencies {
     implementation(project(":dumper:deps:imgencoder"))
     // The decoder side of the fork, which ImageIO finds through its service file. imgencoder keeps it off its API.
     runtimeOnly(libs.webp.imageio)
+
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 /**
@@ -49,13 +57,13 @@ val compareDumps = tasks.register<JavaExec>("compareDumps") {
 }
 
 /**
- * Re-checks the animation detection rules offline on identical pixels (PLAN M4), from the hash sequences one boot of
+ * Re-checks the loop detection rule offline on identical pixels (PLAN M4), from the hash sequences one boot of
  * `./gradlew :dumper:runGame -Pmonifactory.mode=seq` writes to dumper/build/render/seq.csv. Run it on every pack bump:
  * `./gradlew :dumper:compare:checkDetection [-Pmonifactory.seq=<seq.csv>[,<seq.csv>...]]`.
  */
 tasks.register<JavaExec>("checkDetection") {
     group = "modpack"
-    description = "Checks the probe ladder and the frame policy against the full strict rule on recorded sequences."
+    description = "Checks the frame policy against the full strict rule on recorded sequences."
 
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass = "com.iluha168.monifactory.compare.CheckDetection"
@@ -73,7 +81,7 @@ tasks.register<JavaExec>("checkDetection") {
  */
 tasks.register<JavaExec>("verifyArtifact") {
     group = "verification"
-    description = "Checks that every recipes.json entry of an artifact resolves to a decodable image in images.pak, or has none in a data-only artifact."
+    description = "Checks that every recipes.json picture of a format 2 artifact can be drawn from its stills, or that it has none in a data-only artifact."
 
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass = "com.iluha168.monifactory.compare.VerifyArtifact"
