@@ -17,6 +17,11 @@ package com.iluha168.monifactory.faketime;
  * every clock read, the frozen ones above and those it leaves running, and the buffers, text and items that go to
  * the GPU.
  * <p>
+ * A layer drawn once over a transparent clear needs its alpha channel to hold coverage, which the game's own blend
+ * state does not give it. So the agent also keeps a copy of the blend state the game asks {@code GlStateManager} for,
+ * and during a {@link #capture} hands it to the renderer before every draw, for the renderer to set the GL's state
+ * the draw goes out with.
+ * <p>
  * State lives in static fields, so there must be exactly one copy of this class that call sites link to. At boot
  * it is the copy in the {@code com.iluha168.monifactory.faketime} module of the MC-BOOTSTRAP layer, which every
  * layer above it reads. The agent never links a call site to the unnamed copy that -javaagent puts on the app
@@ -119,6 +124,42 @@ public final class FakeTime {
 
     private static volatile Recorder recorder;
 
+    /**
+     * Told a blend state as the game asked {@code GlStateManager} for it: whether blending is on, the four factors,
+     * the equation, the colour write mask as bits (8 red, 4 green, 2 blue, 1 alpha), and whether a colour logic op is
+     * on. Factors and the equation are GL enums.
+     */
+    public interface Blend {
+        void state(boolean on, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, int equation, int colorMask,
+                   boolean logicOp);
+    }
+
+    // The blend state asked for, as GlStateManager's own cache holds it, starting from the GL's defaults. The
+    // equation, which GlStateManager does not cache, is the last one asked for. Render thread only: GlStateManager
+    // asserts that right after each hook that writes here.
+    private static boolean blendOn;
+    private static int srcRgb = 1, dstRgb = 0, srcAlpha = 1, dstAlpha = 0;
+    private static int blendEquation = 0x8006;
+    private static int colorMask = 0xF;
+    private static boolean logicOp;
+
+    private static volatile Blend capture;
+
+    /**
+     * From now on, until {@code capture(null)}, calls {@code blend} on entry to every indexed draw the frozen thread
+     * makes, with the blend state asked for at that point. The draw has not gone out yet, so {@code blend} may set the
+     * GL's blend state to something else for it; {@code GlStateManager}'s cache and the copy here keep what the game
+     * asked for, and it is the caller's to put the GL back in line with them afterwards ({@link #blend}).
+     */
+    public static void capture(Blend blend) {
+        FakeTime.capture = blend;
+    }
+
+    /** Tells {@code to} the blend state asked for now. */
+    public static void blend(Blend to) {
+        to.state(blendOn, srcRgb, dstRgb, srcAlpha, dstAlpha, blendEquation, colorMask, logicOp);
+    }
+
     /** Reports the frozen thread's draws to {@code recorder} from now on, or to nobody after {@code null}. */
     public static void record(Recorder recorder) {
         FakeTime.recorder = recorder;
@@ -182,8 +223,41 @@ public final class FakeTime {
     }
 
     public static void onDrawElements() {
+        Blend c = capture;
+        if (c != null && owner == Thread.currentThread()) blend(c);
         Recorder r = listening();
         if (r != null) r.drawElements();
+    }
+
+    /** {@code GlStateManager._enableBlend} with 1, {@code _disableBlend} with 0. */
+    public static void onBlend(int on) {
+        blendOn = on != 0;
+    }
+
+    /** {@code GlStateManager._blendFunc}, which leaves the alpha factors in the cache as they were. */
+    public static void onBlendFunc(int src, int dst) {
+        srcRgb = src;
+        dstRgb = dst;
+    }
+
+    public static void onBlendFuncSeparate(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha) {
+        FakeTime.srcRgb = srcRgb;
+        FakeTime.dstRgb = dstRgb;
+        FakeTime.srcAlpha = srcAlpha;
+        FakeTime.dstAlpha = dstAlpha;
+    }
+
+    public static void onBlendEquation(int mode) {
+        blendEquation = mode;
+    }
+
+    public static void onColorMask(boolean red, boolean green, boolean blue, boolean alpha) {
+        colorMask = (red ? 8 : 0) | (green ? 4 : 0) | (blue ? 2 : 0) | (alpha ? 1 : 0);
+    }
+
+    /** {@code GlStateManager._enableColorLogicOp} with 1, {@code _disableColorLogicOp} with 0. */
+    public static void onLogicOp(int on) {
+        logicOp = on != 0;
     }
 
     public static void onText(Object text, float x, float y, int color, Object matrix) {

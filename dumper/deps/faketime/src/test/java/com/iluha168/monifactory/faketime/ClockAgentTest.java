@@ -39,6 +39,7 @@ class ClockAgentTest {
     private static Class<?> sealedClocks;
     private static Class<?> textureManager;
     private static Class<?> recorderType;
+    private static Class<?> blendType;
     private static ClassLoader loader;
 
     /** Every fixture class the agent hooks, loaded up front so the summary has seen them all. */
@@ -60,6 +61,7 @@ class ClockAgentTest {
         loader = layer.findLoader(FIXTURE);
         fakeTime = Class.forName(MODULE + ".FakeTime", true, loader);
         recorderType = Class.forName(MODULE + ".FakeTime$Recorder", true, loader);
+        blendType = Class.forName(MODULE + ".FakeTime$Blend", true, loader);
         clocks = Class.forName("faketime.fixture.Clocks", true, loader);
         sealedClocks = Class.forName("faketime.fixture.sealed.Clocks", true, loader);
         textureManager = Class.forName("net.minecraft.client.renderer.texture.TextureManager", true, loader);
@@ -69,6 +71,7 @@ class ClockAgentTest {
     @AfterEach
     void reset() throws Exception {
         fakeTime.getMethod("record", recorderType).invoke(null, (Object) null);
+        fakeTime.getMethod("capture", blendType).invoke(null, (Object) null);
         call(fakeTime, "release");
         call(fakeTime, "holdAtlas", true, false);
         FakeTime.release();
@@ -243,12 +246,97 @@ class ClockAgentTest {
         String summary = ClockAgent.summary();
         for (String part : List.of("Util.getMillis patched", "Level time frozen", "TextureManager.tick gated",
                 "Util.getNanos", "Blaze3D.getTime", "RenderSystem.getShaderGameTime", "BufferUploader.upload",
-                "GlStateManager._drawElements", "Font.drawInBatch(String)", "Font.drawInBatch(String,bidi)",
+                "GlStateManager._drawElements", "GlStateManager._enableBlend", "GlStateManager._disableBlend",
+                "GlStateManager._blendFunc", "GlStateManager._blendFuncSeparate", "GlStateManager._blendEquation",
+                "GlStateManager._colorMask", "GlStateManager._enableColorLogicOp",
+                "GlStateManager._disableColorLogicOp", "Font.drawInBatch(String)", "Font.drawInBatch(String,bidi)",
                 "Font.drawInBatch(Component)", "Font.drawInBatch(FormattedCharSequence)", "ItemRenderer.render")) {
             assertTrue(summary.contains(part), part + " missing from " + summary);
         }
         assertFalse(summary.contains("NOT"), summary);
         assertTrue(summary.matches(".*nanoTime counted in [1-9]\\d* classes.*"), summary);
+    }
+
+    @Test
+    void blendStateIsWhatGlStateManagerWasAskedFor() throws Exception {
+        Class<?> gl = fixture("com.mojang.blaze3d.platform.GlStateManager");
+        gl.getMethod("_enableBlend").invoke(null);
+        gl.getMethod("_blendFuncSeparate", int.class, int.class, int.class, int.class)
+                .invoke(null, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+        gl.getMethod("_blendEquation", int.class).invoke(null, GL_FUNC_ADD);
+        gl.getMethod("_colorMask", boolean.class, boolean.class, boolean.class, boolean.class)
+                .invoke(null, true, true, true, true);
+        gl.getMethod("_disableColorLogicOp").invoke(null);
+        assertEquals(List.of(true, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO, GL_FUNC_ADD, 0xF, false),
+                blend());
+
+        // _blendFunc leaves the alpha factors alone, as it leaves them in GlStateManager's cache.
+        gl.getMethod("_blendFunc", int.class, int.class).invoke(null, GL_SRC_COLOR, GL_ONE);
+        gl.getMethod("_colorMask", boolean.class, boolean.class, boolean.class, boolean.class)
+                .invoke(null, true, false, true, false);
+        gl.getMethod("_enableColorLogicOp").invoke(null);
+        gl.getMethod("_disableBlend").invoke(null);
+        gl.getMethod("_blendEquation", int.class).invoke(null, GL_FUNC_REVERSE_SUBTRACT);
+        assertEquals(List.of(false, GL_SRC_COLOR, GL_ONE, GL_ONE, GL_ZERO, GL_FUNC_REVERSE_SUBTRACT, 0xA, true),
+                blend());
+
+        // Any thread's calls count: only the render thread makes them, and GlStateManager asserts that itself.
+        onOtherThread(() -> gl.getMethod("_enableBlend").invoke(null));
+        assertEquals(true, blend().get(0));
+    }
+
+    @Test
+    void aCaptureIsToldTheBlendStateBeforeEveryDrawOfTheFrozenThread() throws Exception {
+        Class<?> gl = fixture("com.mojang.blaze3d.platform.GlStateManager");
+        Method drawElements = gl.getMethod("_drawElements", int.class, int.class, int.class, long.class);
+        gl.getMethod("_disableBlend").invoke(null);
+        gl.getMethod("_blendFuncSeparate", int.class, int.class, int.class, int.class)
+                .invoke(null, GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
+        gl.getMethod("_blendEquation", int.class).invoke(null, GL_FUNC_ADD);
+        gl.getMethod("_colorMask", boolean.class, boolean.class, boolean.class, boolean.class)
+                .invoke(null, true, true, true, true);
+        gl.getMethod("_disableColorLogicOp").invoke(null);
+        List<List<Object>> told = Collections.synchronizedList(new ArrayList<>());
+        Object capture = Proxy.newProxyInstance(loader, new Class<?>[]{blendType}, (proxy, method, args) -> {
+            told.add(Arrays.asList(args));
+            return null;
+        });
+        fakeTime.getMethod("capture", blendType).invoke(null, capture);
+
+        drawElements.invoke(null, 4, 6, 5125, 0L);
+        assertEquals(List.of(), told, "told without a frozen clock");
+
+        call(fakeTime, "freeze", long.class, FROZEN);
+        onOtherThread(() -> drawElements.invoke(null, 4, 6, 5125, 0L));
+        assertEquals(List.of(), told, "told of another thread's draw");
+
+        drawElements.invoke(null, 4, 6, 5125, 0L);
+        gl.getMethod("_enableBlend").invoke(null);
+        gl.getMethod("_blendFunc", int.class, int.class).invoke(null, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        assertEquals(1, told.size(), "told of a state change rather than a draw");
+        drawElements.invoke(null, 4, 6, 5125, 0L);
+        assertEquals(List.of(
+                List.of(false, GL_ONE, GL_ZERO, GL_ONE, GL_ZERO, GL_FUNC_ADD, 0xF, false),
+                List.of(true, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO, GL_FUNC_ADD, 0xF, false)), told);
+
+        fakeTime.getMethod("capture", blendType).invoke(null, (Object) null);
+        told.clear();
+        drawElements.invoke(null, 4, 6, 5125, 0L);
+        assertEquals(List.of(), told, "told after the capture ended");
+    }
+
+    private static final int GL_ZERO = 0, GL_ONE = 1, GL_SRC_COLOR = 0x0300, GL_SRC_ALPHA = 0x0302,
+            GL_ONE_MINUS_SRC_ALPHA = 0x0303, GL_FUNC_ADD = 0x8006, GL_FUNC_REVERSE_SUBTRACT = 0x800B;
+
+    /** The blend state FakeTime holds now, as {@code Blend.state} gets it. */
+    private static List<Object> blend() throws Exception {
+        List<Object> state = new ArrayList<>();
+        Object to = Proxy.newProxyInstance(loader, new Class<?>[]{blendType}, (proxy, method, args) -> {
+            state.addAll(Arrays.asList(args));
+            return null;
+        });
+        fakeTime.getMethod("blend", blendType).invoke(null, to);
+        return state;
     }
 
     /** What {@link #draw} should record, in order. */

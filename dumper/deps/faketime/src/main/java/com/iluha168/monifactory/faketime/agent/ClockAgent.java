@@ -44,6 +44,10 @@ import java.util.stream.Collectors;
  * {@code RenderSystem.getShaderGameTime()}) and to what draws: {@code BufferUploader.upload},
  * {@code GlStateManager._drawElements}, {@code Font.drawInBatch} and {@code ItemRenderer.render}.</li>
  * </ul>
+ * And a layer drawn once has to have its alpha channel set up by the renderer right before each of its draws (see
+ * {@link FakeTime#capture}), from the blend state the game asked for. So a call on entry to each
+ * {@code GlStateManager} method that sets what blending writes keeps FakeTime's copy of it: blending on and off, the
+ * factors, the equation, the colour mask and the colour logic op. These change nothing either.
  * There is no list of mod classes. Naming the classes to patch means naming mods, and such a list is only as
  * complete as the last search for one. Instead the agent patches whatever can link: a rewritten call site references
  * FakeTime, so it goes only into classes whose module can read FakeTime's. Forge runs several module layers, and
@@ -104,6 +108,7 @@ public final class ClockAgent implements ClassFileTransformer {
     private static final Set<String> LEVEL_TIME = Set.of("Level.getGameTime", "Level.getDayTime");
 
     private static final String ON_TIME = "(I)V";
+    private static final String GL_STATE = "com/mojang/blaze3d/platform/GlStateManager";
     private static final String FONT = "net/minecraft/client/gui/Font";
     /** What every drawInBatch overload takes after the text. The one with a bidi flag takes it after these. */
     private static final String DRAW_IN_BATCH = "FFIZLorg/joml/Matrix4f;"
@@ -113,7 +118,7 @@ public final class ClockAgent implements ClassFileTransformer {
     private static final int[] TEXT_ARGS = {Opcodes.ALOAD, 1, Opcodes.FLOAD, 2, Opcodes.FLOAD, 3, Opcodes.ILOAD, 4,
             Opcodes.ALOAD, 6};
 
-    // Return hooks freeze a clock, entry hooks only report to the recorder. The TIME_ constants are compile-time
+    // Return hooks freeze a clock, entry hooks only report to FakeTime. The TIME_ constants are compile-time
     // constants, so naming them here loads no FakeTime into the agent's own class loader.
     private static final List<Hook> HOOKS = List.of(
             atReturn(UTIL_GET_MILLIS, UTIL, Set.of("m_137550_", "getMillis"), "()J", "utilMillis", "(J)J"),
@@ -131,8 +136,25 @@ public final class ClockAgent implements ClassFileTransformer {
                     "(Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;)"
                             + "Lcom/mojang/blaze3d/vertex/VertexBuffer;",
                     "onUpload", "(Ljava/lang/Object;)V", Opcodes.ALOAD, 0),
-            atEntry("GlStateManager._drawElements", "com/mojang/blaze3d/platform/GlStateManager",
-                    Set.of("_drawElements"), "(IIIJ)V", "onDrawElements", "()V"),
+            atEntry("GlStateManager._drawElements", GL_STATE, Set.of("_drawElements"), "(IIIJ)V", "onDrawElements",
+                    "()V"),
+            atEntry("GlStateManager._enableBlend", GL_STATE, Set.of("_enableBlend"), "()V", "onBlend", "(I)V",
+                    Opcodes.BIPUSH, 1),
+            atEntry("GlStateManager._disableBlend", GL_STATE, Set.of("_disableBlend"), "()V", "onBlend", "(I)V",
+                    Opcodes.BIPUSH, 0),
+            atEntry("GlStateManager._blendFunc", GL_STATE, Set.of("_blendFunc"), "(II)V", "onBlendFunc", "(II)V",
+                    Opcodes.ILOAD, 0, Opcodes.ILOAD, 1),
+            atEntry("GlStateManager._blendFuncSeparate", GL_STATE, Set.of("_blendFuncSeparate"), "(IIII)V",
+                    "onBlendFuncSeparate", "(IIII)V", Opcodes.ILOAD, 0, Opcodes.ILOAD, 1, Opcodes.ILOAD, 2,
+                    Opcodes.ILOAD, 3),
+            atEntry("GlStateManager._blendEquation", GL_STATE, Set.of("_blendEquation"), "(I)V", "onBlendEquation",
+                    "(I)V", Opcodes.ILOAD, 0),
+            atEntry("GlStateManager._colorMask", GL_STATE, Set.of("_colorMask"), "(ZZZZ)V", "onColorMask", "(ZZZZ)V",
+                    Opcodes.ILOAD, 0, Opcodes.ILOAD, 1, Opcodes.ILOAD, 2, Opcodes.ILOAD, 3),
+            atEntry("GlStateManager._enableColorLogicOp", GL_STATE, Set.of("_enableColorLogicOp"), "()V", "onLogicOp",
+                    "(I)V", Opcodes.BIPUSH, 1),
+            atEntry("GlStateManager._disableColorLogicOp", GL_STATE, Set.of("_disableColorLogicOp"), "()V",
+                    "onLogicOp", "(I)V", Opcodes.BIPUSH, 0),
             atEntry("Font.drawInBatch(String)", FONT, Set.of("m_271703_", "drawInBatch"),
                     "(Ljava/lang/String;" + DRAW_IN_BATCH + ")I", "onText", ON_TEXT, TEXT_ARGS),
             atEntry("Font.drawInBatch(String,bidi)", FONT, Set.of("m_272078_", "drawInBatch"),
@@ -166,8 +188,8 @@ public final class ClockAgent implements ClassFileTransformer {
 
     /** What the agent did so far, one line. Printed at exit. */
     public static String summary() {
-        List<String> recorderHooks = HOOKS.stream().filter(h -> !h.atReturn()).map(Hook::label).toList();
-        List<String> missing = recorderHooks.stream().filter(label -> !hooksPatched.contains(label)).toList();
+        List<String> entryHooks = HOOKS.stream().filter(h -> !h.atReturn()).map(Hook::label).toList();
+        List<String> missing = entryHooks.stream().filter(label -> !hooksPatched.contains(label)).toList();
         return "[faketime] scanned=" + scanned.get()
                 + " currentTimeMillis patched in " + total(patchedByModule) + " classes " + sorted(patchedByModule)
                 + ", nanoTime counted in " + nanoPatched.get() + " classes"
@@ -175,7 +197,7 @@ public final class ClockAgent implements ClassFileTransformer {
                 + ", Util.getMillis " + (hooksPatched.contains(UTIL_GET_MILLIS) ? "patched" : "NOT patched")
                 + ", Level time " + (hooksPatched.containsAll(LEVEL_TIME) ? "frozen" : "NOT frozen")
                 + ", TextureManager.tick " + (atlasPatched ? "gated" : "NOT gated")
-                + ", recorder hooks " + recorderHooks.stream().filter(hooksPatched::contains).toList()
+                + ", entry hooks " + entryHooks.stream().filter(hooksPatched::contains).toList()
                 + (missing.isEmpty() ? "" : ", NOT hooked " + missing);
     }
 
