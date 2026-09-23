@@ -112,6 +112,19 @@ dependencies {
     compileOnly(project(":dumper:deps:imgencoder"))
 }
 
+// Tests cover the pure classes only: the matte, the reconstruction check, the tile packing. Minecraft is on their
+// classpath through implementation, but nothing a test loads touches it, and there is no game to boot.
+dependencies {
+    testImplementation(project(":dumper:deps:imgencoder"))
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
 // Libraries the renderer carries inside its own jar, in Forge's jar-in-jar layout. Forge loads each nested jar that has
 // no mods.toml as a GAMELIBRARY, a module in the GAME layer next to the mods. Neither -cp nor a jar dropped loose in
 // mods/ would do: webp-imageio is written in Kotlin, and the pack's Kotlin for Forge is a LIBRARY in the PLUGIN layer
