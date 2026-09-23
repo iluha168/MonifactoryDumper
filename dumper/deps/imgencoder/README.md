@@ -16,6 +16,10 @@ I bet we can profit on the fact that all images are minecraft-y (pixel art), and
   if it closes within 400 frames, otherwise the first 40.
 - `PakWriter` and `PakReader` handle `images.pak`: payloads back to back, no header. Each recipe record carries
   its own `offset` and `bytes` (PLAN section 6).
+- `layered` is artifact format 2 (`ignored/layers/DESIGN.md`): `LayeredImage`, `Layer` and `Timeline` are a
+  record's `"image"` object and write it; `StillWriter` dedupes stills by `StillHash`, encodes them on the caller's
+  executor and writes `stills.pak` in id order plus `stills.json` (`StillTable`); `Compositor` draws an image at a
+  tick. Reading the JSON back is `dumper/compare`'s job, with the Gson it already has.
 
 `./gradlew :dumper:deps:imgencoder:test` decodes every test picture back through the fork's reader and, where it is
 installed, through `dwebp`, and fails on any pixel that differs.
