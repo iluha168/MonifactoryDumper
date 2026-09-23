@@ -31,8 +31,74 @@ val forgeVersion = libs.versions.forge.get()
 /** How the Forge installer names what it installs, and what the game is launched as. */
 val versionName = "$mcVersion-forge-$forgeVersion"
 
-/** Monifactory does not finish loading in a default heap. Override with -Pmonifactory.heap=4G. */
-val maxHeap = providers.gradleProperty("monifactory.heap").getOrElse("8G")
+/**
+ * Each game's -Xmx, -Pmonifactory.heap. Monifactory does not finish loading in a default heap, and 5G is what the
+ * measurements behind [GameMemory] were taken at. Less works down to 4G, see [GameMemory.heapWarning].
+ */
+val maxHeap = providers.gradleProperty("monifactory.heap").getOrElse("5G")
+
+/**
+ * JVM flags every game gets, one game or several. They change nothing a dump contains, so like the heap they are kept
+ * out of the argfile, which is an input of every dump. They only do their part together with the renderer's
+ * ServerLeftovers, whose one full collection after EMI's reload is where G1 can give memory back: 7.9 GB resident
+ * while rendering drops to 7.0 GB at -Xmx5G.
+ * - The free ratios let G1 return the heap the boot needed and the render does not: committed 5 GB -> about 4.7 GB.
+ * - The trim hands what glibc's arenas have freed back to the system every 10 s, 256 to 342 MiB a time. It is a
+ *   product flag from JDK 17.0.9 on.
+ * Not MALLOC_ARENA_MAX=2: 140 MiB less resident, but the encoders then wait on malloc and the batch took 16% longer.
+ */
+val gameJvmFlags = listOf(
+    "-XX:MinHeapFreeRatio=10", "-XX:MaxHeapFreeRatio=30",
+    "-XX:TrimNativeHeapInterval=10000",
+)
+
+/**
+ * The environment every game gets on top of the build's. ALSOFT_DRIVERS=null puts OpenAL on its "No Output" device: the
+ * same sound engine code runs, with no audio server to connect to and nothing playing on this machine's speakers.
+ */
+val gameEnvironment = mapOf("ALSOFT_DRIVERS" to "null")
+
+/**
+ * What one game needs, as measured on Monifactory 0.13.8 at -Xmx5G with [gameJvmFlags] and the renderer's server
+ * release (ignored/perf/REPORT.md): about 8 GB resident at the boot's peak, which is over once the renderer logs that
+ * it released the server side, and about 7.5 GB while it renders. Beyond the heap that is metaspace, the code cache and
+ * GC structures (about 0.9 GB), and what the JVM does not see: LWJGL, the NVIDIA driver, the WebP encoders' malloc
+ * arenas and thread stacks (about 1.5 GB). GPU memory is about 325 MiB a game and never the limit.
+ */
+object GameMemory {
+    /** The heap the numbers here were measured at. */
+    const val MEASURED_HEAP_MIB = 5L * 1024
+    /** Resident beyond the heap while a game renders, and at its boot's peak. */
+    const val RENDER_OVERHEAD_MIB = 2560L
+    const val BOOT_OVERHEAD_MIB = 3072L
+
+    /** An -Xmx size in MiB, or null if it is not one this understands. */
+    fun mib(size: String): Long? {
+        val match = Regex("""(\d+)([kKmMgGtT]?)""").matchEntire(size.trim()) ?: return null
+        val value = match.groupValues[1].toLong()
+        return when (match.groupValues[2].lowercase()) {
+            "k" -> value / 1024
+            "m" -> value
+            "g" -> value * 1024
+            "t" -> value * 1024 * 1024
+            else -> value / (1024 * 1024)
+        }
+    }
+
+    /**
+     * Why a heap below 5G is a bad idea, or null. At -Xmx4G the boot fills the heap: three full collections of 0.6 to
+     * 0.8 s during EMI's reload, and a batch 9% slower than at 5G. 3G runs out during EMI's reload, and the game then
+     * exits 0 without an artifact. 4G did not change the pictures: the 25 Thermal fuel pictures that differed in that
+     * run show a 20-second JEI timer that starts at a different phase every boot (see the README).
+     */
+    fun heapWarning(size: String): String? {
+        val heap = mib(size) ?: return null
+        if (heap >= MEASURED_HEAP_MIB) return null
+        return ("-Xmx$size is below the 5G a game should have. At 4G the boot fills the heap and needs full "
+            + "collections, and the batch runs about 9% slower; at 3G it runs out during EMI's reload and the game "
+            + "exits without an artifact. Use -Pmonifactory.heap=5G.")
+    }
+}
 
 minecraft {
     mappings("official", mcVersion)
@@ -497,14 +563,17 @@ fun Exec.bootRenderer(mode: String, output: Provider<Directory>, vararg properti
     properties.forEach { (key, value) -> args("-Dmonifactory.dumper.$key=$value") }
     argumentProviders.add(SystemProperty("monifactory.dumper.output", out))
     // Monifactory does not finish loading in a default heap. Here rather than in the argfile, see writeLaunchArgs.
-    argumentProviders.add(Heap(maxHeap))
+    argumentProviders.add(Heap(maxHeap, gameJvmFlags))
     argumentProviders.add(ArgFile(launchArgs))
+    val heapWarning = GameMemory.heapWarning(maxHeap)
+    if (heapWarning != null) doFirst { logger.warn(heapWarning) }
 
     // The fake GLFW never talks to a display server, so the game gets none. Anything in the pack
     // that still reaches for one - AWT, tinyfd - fails where it can be seen instead of opening a
     // window on whoever's desktop the build happens to run.
     environment.remove("DISPLAY")
     environment.remove("WAYLAND_DISPLAY")
+    environment(gameEnvironment)
 }
 
 /** What runGame makes: sample (the default), census, seq, dump or data. See Dumper.Mode. */
@@ -583,12 +652,12 @@ class SystemProperty(private val key: String, private val value: Provider<File>)
 }
 
 /**
- * The game's -Xmx. A provider, not a plain argument: Exec's args are inputs, and a heap changes nothing a dump
- * contains, so asking for a different one must not redo a finished dump. A provider is an input only through its
- * annotated properties, and this one has none.
+ * The game's -Xmx and [gameJvmFlags]. A provider, not plain arguments: Exec's args are inputs, and neither changes
+ * anything a dump contains, so asking for a different heap must not redo a finished dump. A provider is an input only
+ * through its annotated properties, and this one has none.
  */
-class Heap(private val size: String) : CommandLineArgumentProvider {
-    override fun asArguments() = listOf("-Xmx$size")
+class Heap(private val size: String, private val flags: List<String>) : CommandLineArgumentProvider {
+    override fun asArguments() = listOf("-Xmx$size") + flags
 }
 
 /** MergeShards' command line: the artifact to write and every game's directory, which are named by index. */
@@ -699,6 +768,8 @@ fun registerDump(
         count = processes
         settings = rendererSettings.map { (key, value) -> "$key=$value" }
         heap = maxHeap
+        jvmFlags = gameJvmFlags
+        environment = gameEnvironment
         javaExecutable = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.absolutePath
         argFile = launchArgs
         instance = instanceDir
@@ -936,6 +1007,14 @@ abstract class ShardedGames : DefaultTask() {
     @get:Internal
     abstract val heap: Property<String>
 
+    /** JVM flags every game gets after its -Xmx; nor are these. */
+    @get:Internal
+    abstract val jvmFlags: ListProperty<String>
+
+    /** Added to each game's environment. */
+    @get:Internal
+    abstract val environment: MapProperty<String, String>
+
     @get:Internal
     abstract val javaExecutable: Property<String>
 
@@ -995,6 +1074,7 @@ abstract class ShardedGames : DefaultTask() {
                 add("-Dmonifactory.dumper.shard=$index")
                 add("-Dmonifactory.dumper.output=${artifact.absolutePath}")
                 add("-Xmx${heap.get()}")
+                addAll(jvmFlags.get())
                 add("@${args.absolutePath}")
             }
             val builder = ProcessBuilder(command).directory(instance).redirectErrorStream(true)
@@ -1002,6 +1082,7 @@ abstract class ShardedGames : DefaultTask() {
             // As for the single game: no display server, so nothing in the pack can open a window.
             builder.environment().remove("DISPLAY")
             builder.environment().remove("WAYLAND_DISPLAY")
+            builder.environment().putAll(environment.get())
             process = builder.start()
             started = System.nanoTime()
             lastChange = started
@@ -1081,6 +1162,7 @@ abstract class ShardedGames : DefaultTask() {
                     + "sample=$every: it picks by what a recipe is, which every game agrees on."
             )
         }
+        GameMemory.heapWarning(heap.get())?.let { logger.warn(it) }
         warnAboutMemory(n)
 
         val root = shards.get().asFile
