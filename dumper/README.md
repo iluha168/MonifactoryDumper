@@ -8,7 +8,7 @@ And also without title screen music playing on a window you cant see :P
 ## Building the artifact
 
 ```sh
-./gradlew :dumper:dump -Pmonifactory.heap=4G
+./gradlew :dumper:dump
 ```
 
 That one task does everything, from an empty `~/.gradle` and an empty build directory: asks CurseForge which
@@ -46,14 +46,50 @@ size `stills.json` gives, every record's picture only uses stills that exist, at
 its recipe's size, and meta.json's counts agree. `./gradlew :dumper:compare:verifyArtifact
 -Pmonifactory.artifact=<dir>` runs the same check on any directory.
 
-What it costs: a GPU with an EGL driver, about 6 to 6.5 GB of RAM at `-Pmonifactory.heap=4G` and 7 to 8 GB at 5G (the
-default 8G heap wants more; 3G is too small and runs out during EMI's reload), and a few hours of wall clock on a laptop
-RTX 3050 with 12 hardware threads: about 3 minutes to boot, then about 71 ms of the game's render thread per recipe,
-two and a half hours for the whole corpus (an `every=50` sample's batch took 3 minutes). Rendering is the long part,
-since about 40% of recipes have a layer that animates, and each such layer is drawn frame by frame until its loop closes
-or 400 frames go by. The first run also downloads about 1 GB (the pack, Minecraft, Forge's libraries and the game's
-assets). Run it on an otherwise idle machine: if an out-of-memory killer takes the game, the build fails with exit 143
-and starts over next time.
+What it costs: a GPU with an EGL driver (about 325 MiB of its memory), about 8 GB of RAM, and an hour or two of wall
+clock on a laptop RTX 3050 with 12 hardware threads. The game boots in about 2 minutes; then the render thread spends
+about 50 ms per recipe (a `sample=50` batch of 2,379 recipes took 2 minutes), which puts the whole corpus of 121,000 at
+1.7 hours. Rendering is the long part, since about 40% of recipes have a layer that animates, and each such layer is
+drawn frame by frame until its loop closes or 400 frames go by. The first run also downloads about 1 GB (the pack,
+Minecraft, Forge's libraries and the game's assets). Run it on an otherwise idle machine: if an out-of-memory killer
+takes the game, the build fails with exit 143 and starts over next time.
+
+### Memory and CPU
+
+`-Pmonifactory.heap` is the game's `-Xmx`, 5G unless given. At 5G a game is about 8 GB resident at its peak, during
+the boot's datapack and EMI reloads, and about 7.5 GB while it renders (7.0 GB on average in the measured runs). The
+rest beyond the heap is metaspace, the code cache and GC structures (about 0.9 GB), and what the JVM does not count:
+LWJGL, the NVIDIA driver, the WebP encoders' malloc arenas and thread stacks (about 1.5 GB). While it renders a game
+keeps about 4.6 cores busy: its render thread, the encoders and G1.
+
+Less heap is not worth it. At 4G the boot fills the heap and needs three full collections, and the batch took 9% longer;
+at 3G it runs out during EMI's reload, and the game exits 0 without an artifact. The build warns below 5G. A 4G run's
+25 Thermal Stirling fuel pictures once came out without their animated layer, but that was not the heap: the JEI tick
+timer in TooManyRecipeViewers starts its 20-second cycle on the real clock when the category is built, and a layer that
+does not loop within 400 frames keeps its first 2 seconds, so each boot keeps a different stretch of the fuel bar, and
+in that boot a stretch where it did not move. Two boots at any heap can differ there.
+
+Three things keep a game at those numbers:
+
+- Once EMI has loaded, the renderer lets go of what the server datapack reload left behind in mods' statics, which
+  nothing reads again: the server's recipe manager, which KubeJS and Thermal both kept (712 MB), KubeJS's regex filter
+  caches (195 MB), and pieces emi_loot, CodeChickenLib and GregTech kept. It collects once and logs
+  `[dumper] released the server side: heap N MiB used after GC` (about 3,240 MiB). Each release is reflection on its
+  own; a mod that is not there or renamed a field costs that step and a log line. Without it the heap stays 4.1 GB
+  full, G1 marks through the whole batch, and the batch takes 15 to 19% longer.
+- Every game gets `-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30`, so G1 gives back the heap the boot needed after
+  that collection (5 GB committed becomes about 4.7), and `-XX:TrimNativeHeapInterval=10000`, which returns what
+  glibc's arenas have freed every 10 s (a product flag from JDK 17.0.9). Together with the release they take a game
+  from 7.9 to 7.0 GB resident while it renders. `MALLOC_ARENA_MAX=2` would save another 140 MiB and cost 16% of the
+  batch time, so it is not set.
+- `ALSOFT_DRIVERS=null` in the game's environment puts OpenAL on its "No Output" device: the same sound code runs, with
+  no audio server and nothing on the speakers.
+
+Two more things are about CPU. The headless GLFW's `glfwWaitEventsTimeout` sleeps for its timeout, so the frame limiter
+no longer spins a core through the boot (about 58 CPU-seconds a boot). And once the batch starts, the renderer stops the
+client's game ticks by making a tick last `Float.MAX_VALUE` milliseconds: the fake clock does not cover `partialTick`,
+direct reads of the level's game time, GregTech's `CLIENT_TIME` or the shaders' `GameTime`, and now they stand still
+too.
 
 On the very first build, ForgeGradle's Mavenizer decompiles Minecraft in a JVM of its own with `-Xms4G` and no
 maximum, so it may take a quarter of the machine's RAM. On a machine with little free memory that JVM is the one an
@@ -61,7 +97,7 @@ out-of-memory killer picks (seen here as "Failed to run MCP Step (exit code 143)
 gets past it; the game's own `-Xmx` and Gradle's `org.gradle.jvmargs` come later on their command lines and still win:
 
 ```sh
-JAVA_TOOL_OPTIONS=-Xmx5g ./gradlew :dumper:dump -Pmonifactory.heap=4G
+JAVA_TOOL_OPTIONS=-Xmx5g ./gradlew :dumper:dump
 ```
 
 meta.json's `pack.version` and `pack.mode` come from the running game, not from a config file. The mode is KubeJS's
@@ -81,7 +117,7 @@ the first N recipes of whatever those pick, for trying the build out.
 ## Several games at once
 
 ```sh
-./gradlew :dumper:dump -Pmonifactory.heap=4G -Pmonifactory.processes=3
+./gradlew :dumper:dump -Pmonifactory.processes=3
 ```
 
 The render thread is where a game spends its time, and a game has one, so the build can run N games side by side, each
@@ -94,14 +130,18 @@ above, with no merge.
   kind, so it picks the same recipes in every game. `count=N` is the first N of the recipes picked, split between the
   games. `every=N` picks by place in the list, which is not the same in any two boots, so the build refuses it with
   more than one game; use `sample=N` instead.
-- The games start together. Each runs in an instance directory of its own, since a boot writes into its instance:
+- The games start one at a time: game k+1 starts once game k has logged `[dumper] released the server side`, about
+  2 minutes into its boot. A boot's memory peak comes before that line, so only one game is ever at its peak. A game
+  that fails or hangs before the line holds the next one back until it exits or goes 30 minutes without output, and
+  a game started again after a failure waits its turn the same way.
+- Each game runs in an instance directory of its own, since a boot writes into its instance:
   `logs/`, `journeymap/`, `local/`, `fancymenu_data/`, and nearly every file in `config/` (rewritten with the same text
   each boot, a few with a new timestamp). Game 0 runs in `dumper/build/instance`; game k in
   `dumper/build/instances/<k>`, a fresh copy of game 0's made before the games start (about 80 MB, a second or two),
   whose `mods/`, `resourcepacks/` and `shaderpacks/` are symlinks to game 0's, since no boot writes there. Each game
   has its own natives directory too, `dumper/build/instances/<k>-natives`.
 - Each game uses fewer threads: encoders `(cores - 1 - N) / N` instead of `cores - 2`, and two matte threads instead of
-  four. `-Pmonifactory.heap` is each game's heap.
+  four. `-Pmonifactory.heap` is each game's heap, and each gets the flags and environment above.
 - A game that fails is started again once, on its own, while the others go on: a non-zero exit (the server datapack
   reload timeout, or 143 when an out-of-memory killer took it), an exit without a finished artifact, or 30 minutes
   without a line of output (a boot hung in mod construction, which one game alone waits 12 hours on). A second failure
@@ -117,16 +157,29 @@ above, with no merge.
   game's boot listed and another's did not, and the merge prints the same with how many of those were drawn.
 - The shards merge in whatever order they finished; the result depends only on what they hold.
 
-Memory is the limit. Each game needs its heap plus 2 to 3 GB, and the build warns when N of them want more than the
-machine has available. Believe the warning. With 10 GB free, two 4G games were killed by earlyoom within minutes; with
-swap turned on instead, both slowed to a crawl, and the NVIDIA driver failed to map GPU memory and left the GPU needing
-a reboot. `rebuild` and `rebuildCheck` take `-Pmonifactory.processes` too (their games write
+Memory is the limit. At the default 5G heap, N staggered games want about 7.5 GB for each game rendering and 8 GB for
+the one booting, and the machine wants some room for everything else: (N - 1) x 7.5 + 8 + 2 GB of available memory.
+That is about 18 GB for 2 games and 25 GB for 3, so with 26 GB available, run 3. The build warns when N games want more
+than the machine has available. Believe the warning. With 10 GB free, two 4G games were killed by earlyoom within
+minutes; with swap turned on instead, both slowed to a crawl, and the NVIDIA driver failed to map GPU memory and left
+the GPU needing a reboot. CPU runs out next: each game keeps about 4.6 cores busy while it renders, so on 12 hardware
+threads a third game shares cores with the other two.
+
+The staggered start costs a boot per extra game, about 2 minutes, so more games only pay off when the batch is longer
+than that. A `sample=50` build (2,381 recipes) took 4 minutes 15 seconds with one game and 5 minutes 40 seconds with
+two: game 1 started 2 minutes into game 0's run, and game 0's batch was done a minute and a half later. The games'
+render threads spent 51 ms a recipe alone and 58 ms side by side, so the whole corpus should take about an hour with
+two games against an hour and three quarters with one. The shares are not even either: a recipe's key goes with its
+game, and some keys are shared by many recipes (three framing saw keys by 134 each), so the two games got 1,300 and
+1,081 of the 2,381.
+
+`rebuild` and `rebuildCheck` take `-Pmonifactory.processes` too (their games write
 `dumper/build/shards/rebuild`); `dumpData` is always one game.
 
 ## Recipes without images
 
 ```sh
-./gradlew :dumper:dumpData -Pmonifactory.heap=4G
+./gradlew :dumper:dumpData
 ```
 
 The same boot, the same corpus and the same `recipes.json` records, but nothing is drawn: every record's `image` is
@@ -169,24 +222,25 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
    and `forge` in `gradle/libs.versions.toml` to what it says and run it again.
    - A Forge bump on the same Minecraft is usually just that. The installer, the launch arguments and the renderer
      all follow the pin.
-   - A Minecraft bump is a port, not a bump. The renderer reaches four Minecraft members by their SRG names:
+   - A Minecraft bump is a port, not a bump. The renderer reaches Minecraft members by their SRG names, among them
      `f_96164_` and `f_104903_` in `Dumper.java`, `m_137550_` (Util.getMillis) and `m_7673_` (TextureManager.tick) in
-     the clock agent. `lwjgl` in the catalog must match the new client's LWJGL, and the build says so if it does not.
-     The clock agent prints `Util.getMillis NOT patched` or `TextureManager.tick NOT gated` at exit if a name
-     stopped matching.
+     the clock agent, and `f_90991_` and `f_92521_` (Minecraft.timer, Timer.msPerTick) in `ClientTicks.java`.
+     `lwjgl` in the catalog must match the new client's LWJGL, and the build says so if it does not. The clock agent
+     prints `Util.getMillis NOT patched` or `TextureManager.tick NOT gated` at exit if a name stopped matching, and
+     the game log says `client ticks keep running` if the timer's did.
 
 3. Re-check the loop detection on the new pack (PLAN M4). One boot records raw frame hashes, then the frame policy
    is checked offline on them:
 
    ```sh
-   ./gradlew :dumper:runGame -Pmonifactory.mode=seq -Pmonifactory.heap=4G
+   ./gradlew :dumper:runGame -Pmonifactory.mode=seq
    ./gradlew :dumper:compare:checkDetection
    ```
 
 4. Smoke test: a sampled artifact takes a fraction of the full build and exercises every category.
 
    ```sh
-   ./gradlew :dumper:dump -Pmonifactory.dumper=every=50 -Pmonifactory.heap=4G
+   ./gradlew :dumper:dump -Pmonifactory.dumper=every=50
    ```
 
    Look at `categories.tsv` for categories that appeared, disappeared or went empty, and at the end of the game log
@@ -196,7 +250,7 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
 5. The full build, which gets its own directory. The previous version's directory stays where it is:
 
    ```sh
-   ./gradlew :dumper:dump -Pmonifactory.heap=4G
+   ./gradlew :dumper:dump
    ```
 
 6. Optionally, compare against the previous pack version. Between versions most differences are real changes, so read
@@ -213,7 +267,7 @@ recipe conflict flicker, and slots whose content it picks per boot), and this bu
 is checked as a set (PLAN section 7):
 
 ```sh
-./gradlew :dumper:rebuildCheck -Pmonifactory.heap=4G
+./gradlew :dumper:rebuildCheck
 ```
 
 It builds the artifact if it is not up to date, builds it again into `<pack>-<version>-rebuild`, verifies both, and
