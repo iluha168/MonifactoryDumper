@@ -18,28 +18,41 @@ exits. It writes one directory per pack version:
 
 ```
 dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
-  recipes.json     every recipe, one JSON record per line, each with the offset and length of its image
-  images.pak       every image, lossless WebP (stills and looping animations), back to back
-  meta.json        pack name, version and mode, Minecraft and Forge, the renderer jar's SHA-256, scale, frame
-                   policy, and whether this is the whole corpus or a sample
+  recipes.json     every recipe, one JSON record per line, each with its picture as layers of still ids ("image")
+  stills.pak       every distinct still, lossless WebP, back to back, in still-id order
+  stills.json      where each still is in stills.pak, and its size
+  meta.json        artifact format (2), pack name, version and mode, Minecraft and Forge, the renderer jar's
+                   SHA-256, scale, frame policy, still and recipe counts, and whether this is the whole corpus or a
+                   sample
   categories.tsv   recipes per EMI category, and how many the section 5 exclusions dropped
-  animation.tsv    what the frame policy decided for each animated recipe
+  render.tsv       how each recipe was drawn: its layers, the animated ones, frames, and why it was drawn whole if it
+                   was (diagnostics, not contract)
 dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
 ```
+
+A recipe's picture is its layers in draw order: EMI's recipe card first, then one layer per EMI widget, GregTech's
+LDLib widgets split per node, so each slot, tank, arrow and text line is a layer of its own. Each layer is a box on the
+canvas and a loop of still ids with how many 50 ms ticks each shows; a static layer is one still. To draw a recipe at
+tick `t`, copy layer 0's current still, put every later layer's over it ("over" per colour channel, rounded after each
+layer), and take the alpha from layer 0. Every layer is checked against EMI's own render of the whole recipe at frame
+0 and during its animation; a recipe whose layers do not reproduce it is stored whole instead, as one layer.
 
 Other projects get the artifact through the `dumpArtifact` configuration, which is `latest`. Gradle needs an artifact's
 path while it resolves dependencies, before the download has said which pack version this is, so the link is what it
 can name.
 
-`verifyDump` runs right after and fails the build unless every `recipes.json` entry resolves to an image in
-`images.pak` that decodes in full, at its recipe's size, and for an animation loops forever and runs for its frame
-count. `./gradlew :dumper:compare:verifyArtifact -Pmonifactory.artifact=<dir>` runs the same check on any directory.
+`verifyDump` runs right after and fails the build unless the stills tile `stills.pak` exactly and each decodes at the
+size `stills.json` gives, every record's picture only uses stills that exist, at one size per layer, inside a canvas of
+its recipe's size, and meta.json's counts agree. `./gradlew :dumper:compare:verifyArtifact
+-Pmonifactory.artifact=<dir>` runs the same check on any directory.
 
 What it costs: a GPU with an EGL driver, about 7 GB of RAM at `-Pmonifactory.heap=4G` (the default 8G heap wants
-more; 3G is too small and runs out during EMI's reload), and hours of wall clock. Rendering is the long part, since
-about 43% of recipes animate and each animated one is drawn frame by frame until its loop closes or 400 frames go by. The first run also downloads about 1 GB (the pack,
-Minecraft, Forge's libraries and the game's assets). Run it on an otherwise idle machine: if an out-of-memory killer
-takes the game, the build fails with exit 143 and starts over next time.
+more; 3G is too small and runs out during EMI's reload), and hours of wall clock: about four for the drawing on a
+laptop RTX 3050 with 12 hardware threads (an `every=50` sample took 290 to 310 s). Rendering is the long part, since
+about 40% of recipes have a layer that animates, and each such layer is drawn frame by frame until its loop closes or
+400 frames go by. The first run also downloads about 1 GB (the pack, Minecraft, Forge's libraries and the game's
+assets). Run it on an otherwise idle machine: if an out-of-memory killer takes the game, the build fails with exit 143
+and starts over next time.
 
 On the very first build, ForgeGradle's Mavenizer decompiles Minecraft in a JVM of its own with `-Xms4G` and no
 maximum, so it may take a quarter of the machine's RAM. On a machine with little free memory that JVM is the one an
@@ -69,21 +82,21 @@ one two builds can be compared on (see below). meta.json marks either artifact `
 ./gradlew :dumper:dumpData -Pmonifactory.heap=4G
 ```
 
-The same boot, the same corpus and the same `recipes.json` records, but nothing is drawn: every record's `frames`,
-`bytes` and `offset` are null. Once the pack and Forge are installed it takes about three minutes (boot, datapack
+The same boot, the same corpus and the same `recipes.json` records, but nothing is drawn: every record's `image` is
+null. Once the pack and Forge are installed it takes about three minutes (boot, datapack
 reload and EMI's reload; writing the 90 MB `recipes.json` is under two seconds) where the full build takes hours. It
 writes a directory of its own that never replaces the full build's or moves `latest`:
 
 ```
 dumper/build/dumps/<pack name>-<pack version>-data/     e.g. Monifactory-0.13.8-data
   recipes.json     every recipe, one JSON record per line, with null image fields
-  meta.json        as for the full build, with "images": false; imagesBytes, scale, frameMillis, probes and
-                   framePolicy are null, since there are no images for them to describe
+  meta.json        as for the full build, with "images": false; scale, frameMillis, framePolicy, stills,
+                   stillsBytes, layered and fallback are null, since there are no images for them to describe
   categories.tsv   as for the full build
 ```
 
 `verifyDumpData` runs right after and fails the build unless every `recipes.json` line parses, no record claims an
-image, there is no `images.pak`, and meta.json counts the same recipes. `every=N`, `sample=N` and `count` work as they
+image, there are no `stills.*`, and meta.json counts the same recipes. `every=N`, `sample=N` and `count` work as they
 do for the full build, and mark the artifact `"partial": true` the same way.
 
 ## Updating to a new pack version
@@ -115,8 +128,8 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
      The clock agent prints `Util.getMillis NOT patched` or `TextureManager.tick NOT gated` at exit if a name
      stopped matching.
 
-3. Re-check the animation detection on the new pack (PLAN M4). One boot records raw frame hashes, then the ladder and
-   the frame policy are checked offline on them:
+3. Re-check the loop detection on the new pack (PLAN M4). One boot records raw frame hashes, then the frame policy
+   is checked offline on them:
 
    ```sh
    ./gradlew :dumper:runGame -Pmonifactory.mode=seq -Pmonifactory.heap=4G

@@ -1,7 +1,6 @@
 package com.iluha168.monifactory.dumper;
 
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.iluha168.monifactory.faketime.FakeTime;
@@ -19,25 +18,34 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 /**
- * {@code meta.json}, the artifact's description of itself (PLAN section 6): which pack it is of, what drew it, and how.
- * A consumer holding only the directory can tell which pack version and mode it has, whether it is the whole corpus or
- * a sample, whether it has images at all, and what a frame is worth. See {@link Pack} for where the pack fields come
- * from.
+ * {@code meta.json}, the artifact's description of itself (PLAN section 6, DESIGN 2.3): which pack it is of, what drew
+ * it, and how. A consumer holding only the directory can tell which pack version and mode it has, which artifact
+ * format, whether it is the whole corpus or a sample, whether it has images at all, and what a frame is worth. See
+ * {@link Pack} for where the pack fields come from.
  */
 final class Meta {
     private Meta() {
     }
 
+    /** The artifact format this renderer writes: layered stills (DESIGN section 2). */
+    static final int FORMAT = 2;
+
     /**
-     * Writes {@code meta.json}. {@code pakBytes} and {@code scale} are null for a data-only artifact, which has no
-     * {@code images.pak}: it says {@code "images": false}, and every field that describes the images (their size, scale,
-     * frame length, probes and frame policy) is null rather than absent, so both kinds of artifact have the same keys.
+     * What a full build says of its pictures: the scale they were drawn at, the stills in {@code stills.pak} and its
+     * size, and how many recipes were drawn as layers and how many whole.
      */
-    static void write(Path file, Pack pack, Batch.Selection selection, int failed, Long pakBytes, Integer scale)
-            throws IOException {
-        boolean images = pakBytes != null;
-        if (images != (scale != null)) throw new IllegalArgumentException("images.pak without a scale, or the reverse");
+    record Images(int scale, int stills, long stillsBytes, int layered, int fallback) {
+    }
+
+    /**
+     * Writes {@code meta.json}. {@code images} is null for a data-only artifact, which has no {@code stills.*}: it
+     * says {@code "images": false}, and every field that describes the pictures (scale, frame length, frame policy,
+     * still count and size, layered and fallback counts) is null rather than absent, so both kinds of artifact have
+     * the same keys.
+     */
+    static void write(Path file, Pack pack, Batch.Selection selection, int failed, Images images) throws IOException {
         JsonObject meta = new JsonObject();
+        meta.addProperty("format", FORMAT);
         JsonObject packJson = new JsonObject();
         packJson.addProperty("name", pack.name());
         packJson.addProperty("version", pack.version());
@@ -55,24 +63,25 @@ final class Meta {
         meta.addProperty("sample", selection.sample());
         meta.addProperty("limit", limit < corpus ? limit : null);
         meta.addProperty("failed", failed);
-        meta.addProperty("images", images);
-        meta.addProperty("imagesBytes", pakBytes);
+        meta.addProperty("images", images != null);
 
-        meta.addProperty("scale", scale);
-        if (images) {
+        if (images != null) {
+            meta.addProperty("scale", images.scale());
             meta.addProperty("frameMillis", FakeTime.FRAME_MILLIS);
-            JsonArray probes = new JsonArray();
-            for (int probe : Batch.PROBES) probes.add(probe);
-            meta.add("probes", probes);
             JsonObject policy = new JsonObject();
             policy.addProperty("cap", FramePolicy.CAP);
             policy.addProperty("trim", FramePolicy.TRIM);
             policy.addProperty("maxStored", FramePolicy.MAX_STORED);
             meta.add("framePolicy", policy);
+            meta.addProperty("stills", images.stills());
+            meta.addProperty("stillsBytes", images.stillsBytes());
+            meta.addProperty("layered", images.layered());
+            meta.addProperty("fallback", images.fallback());
         } else {
-            meta.add("frameMillis", JsonNull.INSTANCE);
-            meta.add("probes", JsonNull.INSTANCE);
-            meta.add("framePolicy", JsonNull.INSTANCE);
+            for (String key : new String[]{"scale", "frameMillis", "framePolicy", "stills", "stillsBytes", "layered",
+                    "fallback"}) {
+                meta.add(key, JsonNull.INSTANCE);
+            }
         }
 
         Files.writeString(file, new GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(meta) + "\n",

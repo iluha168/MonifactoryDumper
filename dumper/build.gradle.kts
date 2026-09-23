@@ -511,7 +511,7 @@ val sampleCount = providers.gradleProperty("monifactory.sample.count")
 val sampleSeed = providers.gradleProperty("monifactory.sample.seed")
 /**
  * Any other renderer setting, as -Pmonifactory.dumper=key=value[,key=value...], each passed on as
- * -Dmonifactory.dumper.key=value: encoders, encodeBufferMiB, keepFramesEvery, every, sample, checkPipeline, checkSync.
+ * -Dmonifactory.dumper.key=value: encoders, encodeBufferMiB, every, sample, checkPipeline, checkSync.
  */
 val rendererSettings = providers.gradleProperty("monifactory.dumper").map { settings ->
     settings.split(",").filter { it.isNotBlank() }.map {
@@ -623,14 +623,15 @@ fun Exec.dumpInputs() {
 
 /**
  * Fails the task unless the game left a finished artifact in [artifact]. The renderer writes meta.json last, after
- * recipes.json and images.pak, so its absence means the run ended early. A clean exit is not proof: when the heap runs
+ * recipes.json and the stills, so its absence means the run ended early. A clean exit is not proof: when the heap runs
  * out, Minecraft's own out-of-memory handling stops the game and the JVM still exits 0 (seen with a 3G heap during
  * EMI's reload), and without this the build would report success with no artifact at all.
  */
 fun Exec.requireArtifact(artifact: Provider<Directory>, images: Boolean = true) {
     val dir = artifact.map { it.asFile }
     val log = instanceDir.get().asFile.resolve("logs/latest.log")
-    val files = listOfNotNull("recipes.json", "images.pak".takeIf { images }, "meta.json")
+    val files = listOfNotNull("recipes.json", "stills.pak".takeIf { images }, "stills.json".takeIf { images },
+        "meta.json")
     doLast {
         val missing = files.filterNot { dir.get().resolve(it).isFile }
         if (missing.isNotEmpty()) {
@@ -644,7 +645,7 @@ fun Exec.requireArtifact(artifact: Provider<Directory>, images: Boolean = true) 
 
 val dump = tasks.register<Exec>("dump") {
     group = "modpack"
-    description = "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, images.pak and meta.json."
+    description = "Boots the pack and writes the artifact directory, build/dumps/<pack>-<version>: recipes.json, stills.pak, stills.json and meta.json."
 
     bootRenderer("dump", artifactDir, *rendererSettings.toTypedArray())
     dumpInputs()
@@ -704,8 +705,9 @@ dependencies {
 }
 
 /**
- * Runs VerifyArtifact over [artifact]: every recipes.json entry's offset and length must be a decodable image, or, for
- * a data-only artifact (meta.json says `"images": false`), every entry must parse and have no image.
+ * Runs VerifyArtifact over [artifact]: every recipes.json picture must be drawable from the artifact's stills, each of
+ * which decodes, or, for a data-only artifact (meta.json says `"images": false`), every entry must parse and have no
+ * image.
  */
 fun JavaExec.verify(artifact: Provider<Directory>) {
     group = "verification"
@@ -727,7 +729,7 @@ fun JavaExec.verify(artifact: Provider<Directory>) {
 }
 
 val verifyDump = tasks.register<JavaExec>("verifyDump") {
-    description = "Checks that every recipes.json entry of the artifact resolves to a decodable image in images.pak."
+    description = "Checks that every recipes.json picture of the artifact can be drawn from its decodable stills."
     verify(artifactDir)
 }
 dump.configure { finalizedBy(verifyDump) }
@@ -756,7 +758,7 @@ val rebuild = tasks.register<Exec>("rebuild") {
 }
 
 val verifyRebuild = tasks.register<JavaExec>("verifyRebuild") {
-    description = "Checks that every recipes.json entry of the rebuild resolves to a decodable image in images.pak."
+    description = "Checks that every recipes.json picture of the rebuild can be drawn from its decodable stills."
     verify(rebuildDir)
 }
 rebuild.configure { finalizedBy(verifyRebuild) }

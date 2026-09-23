@@ -38,7 +38,7 @@ final class RecipeRenderer {
      * The size is {@code (displayWidth + 8) * scale} by {@code (displayHeight + 8) * scale}.
      */
     static NativeImage render(Minecraft minecraft, EmiRecipe recipe, long millis) {
-        RenderTarget target = drawTo(minecraft, recipe, millis, 0);
+        RenderTarget target = drawTo(minecraft, recipe, millis, 0, null);
         NativeImage image = new NativeImage(target.width, target.height, false);
         RenderSystem.bindTexture(target.getColorTextureId());
         image.downloadTexture(0, true);
@@ -84,7 +84,7 @@ final class RecipeRenderer {
      */
     static Readback draw(Minecraft minecraft, EmiRecipe recipe, long millis) {
         long start = System.nanoTime();
-        RenderTarget target = drawTo(minecraft, recipe, millis, 0);
+        RenderTarget target = drawTo(minecraft, recipe, millis, 0, null);
         long drawn = System.nanoTime();
         drawNanos += drawn - start;
         Readback readback = READBACK;
@@ -119,10 +119,18 @@ final class RecipeRenderer {
          * there was none. The returned readback is valid until the next call.
          */
         Readback draw(Minecraft minecraft, EmiRecipe recipe, long millis) {
+            return draw(minecraft, recipe, millis, null);
+        }
+
+        /**
+         * {@link #draw(Minecraft, EmiRecipe, long)} with {@code watch}, if not null, around {@code renderRecipe} and
+         * its flush, inside the frozen time: where a {@link LayerRecorder} watches a whole recipe drawn as one layer.
+         */
+        Readback draw(Minecraft minecraft, EmiRecipe recipe, long millis, TileRenderer.Bracket watch) {
             long start = System.nanoTime();
             int slot = turn;
             turn ^= 1;
-            RenderTarget target = drawTo(minecraft, recipe, millis, 1 + slot);
+            RenderTarget target = drawTo(minecraft, recipe, millis, 1 + slot, watch);
             long drawn = System.nanoTime();
             drawNanos += drawn - start;
             if (buffers[slot] == 0) buffers[slot] = GL15.glGenBuffers();
@@ -195,7 +203,8 @@ final class RecipeRenderer {
      * the same as every layer the layered renderer compares with this picture. With the clock alone, LDLib's widgets
      * would refresh at whatever real tick the player had reached, not at the frozen one.
      */
-    private static RenderTarget drawTo(Minecraft minecraft, EmiRecipe recipe, long millis, int variant) {
+    private static RenderTarget drawTo(Minecraft minecraft, EmiRecipe recipe, long millis, int variant,
+                                       TileRenderer.Bracket watch) {
         int width = recipe.getDisplayWidth() + PADDING;
         int height = recipe.getDisplayHeight() + PADDING;
         int scale = scale(minecraft);
@@ -222,8 +231,12 @@ final class RecipeRenderer {
 
             DrawTime.run(minecraft, millis, () -> {
                 GuiGraphics graphics = new GuiGraphics(minecraft, minecraft.renderBuffers().bufferSource());
-                EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
-                graphics.flush();
+                Runnable draw = () -> {
+                    EmiRenderHelper.renderRecipe(recipe, EmiDrawContext.wrap(graphics), 0, 0, false, -1);
+                    graphics.flush();
+                };
+                if (watch == null) draw.run();
+                else watch.around(draw);
             });
         } finally {
             RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);

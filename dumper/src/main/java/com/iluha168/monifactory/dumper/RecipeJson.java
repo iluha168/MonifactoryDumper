@@ -33,9 +33,8 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * <p>
  * Fields: {@code emiRecipeId} and {@code underlyingRecipeId} (the backing datapack recipe), each null where the recipe
  * has none; {@code cat}; {@code cls}, the EMI display class; {@code w}/{@code h}, the display size; the stack lists
- * {@code in}, {@code cats} and {@code out}; and {@code frames}, {@code bytes} and {@code offset}, the recipe's image in
- * {@code images.pak}, which stay null for a recipe whose image is not rendered (an animated one, until the animation
- * pass exists).
+ * {@code in}, {@code cats} and {@code out}; and {@code image}, the recipe's picture as layers of stills (DESIGN 2.1,
+ * {@code LayeredImage}), null in a data-only artifact and for a recipe that failed to render.
  * <p>
  * A stack is one of three kinds. {@code k=s} is a concrete stack: {@code t} item or fluid, {@code id}, amount
  * {@code n}, an {@code nbt} flag and, when set, the top-level keys {@code nbtk}, a hash of the tag's text {@code nbth}
@@ -55,10 +54,6 @@ final class RecipeJson {
     private RecipeJson() {
     }
 
-    /** Where a recipe's image is: how many frames it holds, and its payload's place in {@code images.pak}. */
-    record Image(int frames, long offset, int bytes) {
-    }
-
     /** A record, and whether any part of it threw. Nothing that throws stops the others from being written. */
     record Line(String json, String error, boolean outputsFromSlots, boolean outputsEmpty) {
     }
@@ -66,10 +61,10 @@ final class RecipeJson {
     /**
      * Writes {@code recipes.json}: a JSON array with one record per line, in the corpus's order. A reader can parse
      * it whole, or stream it line by line and drop the trailing comma. Fails after writing if any record had an
-     * error, since a record with a hole in it is not the recipe. {@code images} holds each record's image, if it has
-     * one yet; a record without one is written with null render fields.
+     * error, since a record with a hole in it is not the recipe. {@code images} holds each record's {@code "image"}
+     * object as JSON text, or null for none.
      */
-    static void writeFile(List<Corpus.Entry> entries, Image[] images, Path file) throws IOException {
+    static void writeFile(List<Corpus.Entry> entries, String[] images, Path file) throws IOException {
         long start = System.nanoTime();
         int errors = 0, fromSlots = 0, empty = 0;
         Map<String, int[]> emptyByCategory = new TreeMap<>();
@@ -121,7 +116,7 @@ final class RecipeJson {
         return write(recipe, category, null);
     }
 
-    static Line write(EmiRecipe recipe, String category, Image image) {
+    static Line write(EmiRecipe recipe, String category, String image) {
         StringBuilder json = new StringBuilder(512);
         StringBuilder error = new StringBuilder();
 
@@ -181,12 +176,7 @@ final class RecipeJson {
         }
         if (fromSlots) json.append(",\"outFrom\":\"slots\"");
 
-        if (image == null) {
-            json.append(",\"frames\":null,\"bytes\":null,\"offset\":null");
-        } else {
-            json.append(",\"frames\":").append(image.frames()).append(",\"bytes\":").append(image.bytes())
-                    .append(",\"offset\":").append(image.offset());
-        }
+        json.append(",\"image\":").append(image == null ? "null" : image);
         if (!error.isEmpty()) json.append(",\"err\":").append(str(error.toString()));
         json.append('}');
         return new Line(json.toString(), error.isEmpty() ? null : error.toString(), fromSlots, empty);

@@ -39,7 +39,10 @@ public final class Dumper {
     static final String SEED_PROPERTY = "monifactory.dumper.seed";
 
     enum Mode {
-        /** The build: {@code recipes.json} for the whole corpus and {@code images.pak}, see {@link Batch}. */
+        /**
+         * The build: {@code recipes.json} for the whole corpus and its pictures, their stills in {@code stills.pak},
+         * see {@link Batch}.
+         */
         DUMP,
         /**
          * The build's {@code recipes.json}, {@code categories.tsv} and {@code meta.json} without any images, see
