@@ -3,6 +3,7 @@ package org.lwjgl.glfw;
 import java.nio.ByteBuffer;
 import java.nio.DoubleBuffer;
 import java.nio.IntBuffer;
+import java.util.concurrent.locks.LockSupport;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.egl.EGL;
 import org.lwjgl.egl.EGL10;
@@ -54,6 +55,8 @@ public final class GLFW {
     private static boolean warnedForeignThread = false;
     private static GLFWErrorCallback errorCallback = null;
     private static int glMajor = 3, glMinor = 3;
+    /** The thread in {@link #glfwWaitEventsTimeout}, if one is, for {@link #glfwPostEmptyEvent} to wake. */
+    private static volatile Thread waiting = null;
 
     private GLFW() {}
 
@@ -174,9 +177,29 @@ public final class GLFW {
     public static void glfwWindowHint(int hint, int value) {}
     public static void glfwShowWindow(long window) {}
     public static void glfwHideWindow(long window) {}
+    /** No window system, so there are never any events to process. */
     public static void glfwPollEvents() {}
-    public static void glfwWaitEventsTimeout(double timeout) {}
-    public static void glfwPostEmptyEvent() {}
+    /**
+     * No event ever comes, so this waits out the timeout: the thread parks until then, or until
+     * {@link #glfwPostEmptyEvent} wakes it. Minecraft's frame limiter ({@code RenderSystem.limitDisplayFPS})
+     * loops on {@link #glfwGetTime} and calls this with what is left of the frame's slot. Returning at once
+     * turned that loop into a busy wait: nearly a whole core for as long as the frames are short, which is
+     * the boot and the reloads, about 58 CPU-seconds a boot that other threads (and other games) could use.
+     */
+    public static void glfwWaitEventsTimeout(double timeout) {
+        if (!(timeout > 0)) return;
+        waiting = Thread.currentThread();
+        try {
+            LockSupport.parkNanos(timeout >= Long.MAX_VALUE / 1e9 ? Long.MAX_VALUE : (long) (timeout * 1e9));
+        } finally {
+            waiting = null;
+        }
+    }
+    /** Wakes a thread waiting in {@link #glfwWaitEventsTimeout}, as the empty event would. */
+    public static void glfwPostEmptyEvent() {
+        Thread parked = waiting;
+        if (parked != null) LockSupport.unpark(parked);
+    }
     public static boolean glfwWindowShouldClose(long window) { return false; }
     public static void glfwSetWindowTitle(long window, CharSequence title) {}
     public static void glfwSetWindowTitle(long window, ByteBuffer title) {}
