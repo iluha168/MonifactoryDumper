@@ -131,8 +131,7 @@ the first N recipes of whatever those pick, for trying the build out.
 
 The render thread is where a game spends its time, and a game has one, so the build can run N games side by side, each
 drawing its share of the recipes, and merge what they write. The artifact is the same kind of directory in the same
-place, with `latest` moved and `verifyDump` run the same way. Leave it out (or say 1) and the build is one game as
-above, with no merge.
+place, with `latest` moved and `verifyDump` run the same way. say 1 and the build is one game as above, with no merge.
 
 - Which game draws a recipe is a hash of what the recipe is, not its place in EMI's list, since that list gains or loses
   a few dozen recipes from boot to boot. That is its category and ids, or with no ids its stacks. Where other recipes

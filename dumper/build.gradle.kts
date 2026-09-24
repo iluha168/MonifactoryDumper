@@ -597,9 +597,9 @@ val rendererSettings = providers.gradleProperty("monifactory.dumper").map { sett
 }.getOrElse(emptyList())
 
 /**
- * How many games the full build runs at once (-Pmonifactory.processes=N, default 1). Each renders the recipes whose
- * stable key hashes to its index into an artifact of its own, and a merge makes the one artifact of them. See
- * [ShardedGames] and MergeShards. The render thread is one game's floor, so N games take about 1/N of the time.
+ * How many games the full build runs at once (-Pmonifactory.processes=N). Each renders the
+ * recipes whose stable key hashes to its index into an artifact of its own, and a merge makes the one artifact of
+ * them. See [ShardedGames] and MergeShards. The render thread is one game's floor, so N games take about 1/N of the time.
  */
 val processes = providers.gradleProperty("monifactory.processes").map { it.trim().toInt() }.getOrElse(1).also {
     if (it < 1) throw GradleException("-Pmonifactory.processes must be at least 1, not $it")
