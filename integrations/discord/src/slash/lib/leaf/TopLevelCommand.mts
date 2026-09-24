@@ -1,14 +1,13 @@
 import type { CreateApplicationCommand } from "discordeno"
-import type { ZodType } from "zod"
-import type { Interaction } from "../BaseCommand.mts"
+import type { z } from "zod"
 import { LeafCommand } from "./LeafCommand.mts"
+import type { TopLevelLikeCommand } from "../CommandRegistry.mts"
 
-export class TopLevelCommand<T> extends LeafCommand<T> {
+export class TopLevelCommand<T extends z.core.$ZodLooseShape> extends LeafCommand<T> implements TopLevelLikeCommand {
 	constructor(
 		public readonly payload: CreateApplicationCommand,
-		schema: ZodType<T, unknown>,
-		run: (interaction: Interaction, args: T) => Promise<unknown>,
+		...args: ConstructorParameters<typeof LeafCommand<T>>
 	) {
-		super(schema, run)
+		super(...args)
 	}
 }

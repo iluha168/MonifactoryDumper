@@ -2,6 +2,7 @@ import { ApplicationCommandTypes, CreateApplicationCommand } from "discordeno"
 import { SubCommand } from "./leaf/SubCommand.mts"
 import { BaseCommand, Interaction } from "./BaseCommand.mts"
 import z from "zod"
+import type { TopLevelLikeCommand } from "./CommandRegistry.mts"
 
 /**
  * They payload is an object containing one key - the name of the subcommand, and its options.
@@ -15,9 +16,10 @@ const schema = z
 		]).transform((entries) => entries[0]),
 	)
 
-export class GroupCommand extends BaseCommand {
+export class GroupCommand extends BaseCommand implements TopLevelLikeCommand {
 	public readonly payload: CreateApplicationCommand
-	private readonly handlers: Map<string, SubCommand<unknown>> = new Map()
+	// deno-lint-ignore no-explicit-any
+	private readonly handlers: Map<string, SubCommand<any>> = new Map()
 
 	constructor(
 		payload: CreateApplicationCommand & {

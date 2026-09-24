@@ -61,14 +61,18 @@ fun registerRun(taskName: String, configuration: String, what: String) {
         outputs.upToDateWhen { false }
 
         workingDir = layout.projectDirectory.asFile
+        // I love free RAM!
+        environment("MALLOC_MMAP_THRESHOLD_", "65536")
         executable = "deno"
         argumentProviders.add(CommandLineArgumentProvider {
             listOf(
                 "run",
                 "--env-file=.env",
                 "--allow-env",
-                "--allow-read=${artifact.singleFile.absolutePath}",
+                "--allow-read",
                 "--allow-net",
+                "--allow-ffi",
+                "--allow-sys=cpus,networkInterfaces,hostname",
                 "src/index.mts",
                 artifact.singleFile.absolutePath,
             )

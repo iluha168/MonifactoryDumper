@@ -1,7 +1,7 @@
 import type { CreateApplicationCommand } from "discordeno"
 import type { BaseCommand, Interaction } from "./BaseCommand.mts"
 
-type TopLevelLikeCommand = BaseCommand & {
+export type TopLevelLikeCommand = BaseCommand & {
 	readonly payload: CreateApplicationCommand
 }
 

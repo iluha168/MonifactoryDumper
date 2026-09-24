@@ -10,7 +10,9 @@
 		"singleQuote": false
 	},
 	"imports": {
+		"canvaskit-wasm": "npm:canvaskit-wasm@^0.42.0",
 		"discordeno": "npm:discordeno@^21.0.0",
+		"sharp": "npm:sharp@^0.35.4",
 		"zod": "npm:zod@^4.6.5"
 	}
 }

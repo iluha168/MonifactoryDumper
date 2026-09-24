@@ -3,6 +3,10 @@ import { dumpDir } from "./path.mts"
 import z from "zod"
 
 const schema = z.object({
+	format: z.literal(2),
+	images: z.boolean(),
+	frameMillis: z.int().positive().nullable(),
+	stills: z.int().nonnegative().nullable(),
 	pack: z.object({
 		name: z.string(),
 		version: z.string(),
