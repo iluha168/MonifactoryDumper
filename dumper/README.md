@@ -30,12 +30,11 @@ dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
 dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
 ```
 
-A recipe's picture is its layers in draw order: EMI's recipe card first, then one layer per EMI widget, GregTech's
-LDLib widgets split per node, so each slot, tank, arrow and text line is a layer of its own. Each layer is a box on the
-canvas and a loop of still ids with how many 50 ms ticks each shows; a static layer is one still. To draw a recipe at
-tick `t`, copy layer 0's current still, put every later layer's over it ("over" per colour channel, rounded after each
-layer), and take the alpha from layer 0. Every layer is checked against EMI's own render of the whole recipe at frame
-0 and during its animation; a recipe whose layers do not reproduce it is stored whole instead, as one layer.
+[FORMAT.md](FORMAT.md) specifies all of it for readers: every field, the stills, and how to draw a recipe at a given
+tick. In short, a recipe's picture is its layers in draw order: EMI's recipe card first, then one layer per EMI
+widget, GregTech's LDLib widgets split per node, so each slot, tank, arrow and text line is a layer of its own. Each
+layer is a box on the canvas and a loop of stills. Every layer is checked against EMI's own render of the whole recipe
+at frame 0 and during its animation; a recipe whose layers do not reproduce it is stored whole instead, as one layer.
 
 Other projects get the artifact through the `dumpArtifact` configuration, which is `latest`. Gradle needs an artifact's
 path while it resolves dependencies, before the download has said which pack version this is, so the link is what it
@@ -205,10 +204,11 @@ writes a directory of its own that never replaces the full build's or moves `lat
 ```
 dumper/build/dumps/<pack name>-<pack version>-data/     e.g. Monifactory-0.13.8-data
   recipes.json     every recipe, one JSON record per line, with null image fields
-  meta.json        as for the full build, with "images": false; scale, frameMillis, framePolicy, stills,
-                   stillsBytes, layered and fallback are null, since there are no images for them to describe
+  meta.json        as for the full build, with "images": false and the image fields null
   categories.tsv   as for the full build
 ```
+
+[FORMAT.md](FORMAT.md) covers this kind of artifact too.
 
 `verifyDumpData` runs right after and fails the build unless every `recipes.json` line parses, no record claims an
 image, there are no `stills.*`, and meta.json counts the same recipes. `every=N`, `sample=N` and `count` work as they
