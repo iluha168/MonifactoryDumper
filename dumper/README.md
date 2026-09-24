@@ -100,6 +100,15 @@ drew different phases from there on. Of the batch's 990 animated pictures, two b
 915, where they agreed on 612 or 613. Without Embeddium's marks, or with its "animate only visible textures" off, every
 tick is the full one again and the log says so.
 
+Each of those ticks is the vanilla one, upload included: the renderer marks the sprite right before it. Left to
+Embeddium, a sprite nothing drew since the last tick only moves its counter, and the GPU keeps the picture of its last
+upload. The next frame to draw that sprite then shows a picture its loop never comes back to, usually frame 0 of the
+next recipe that uses it. Its loop never closes and gets cut at 40 frames, and it jumps back to that picture every 2
+seconds. In 0.13.8 that was about 3,000 layers in 1,682 recipes, such as the LuV circuit tag of
+`gtceu:shaped/large_plasma_turbine`. The boot's own ticks leave counters off their pictures the same way, so the
+first atlas index puts every animated sprite back on its loop's first entry, counter and picture
+(`[dumper] N animated sprites back on their first frame`), and each recipe starts with the last one's marks cleared.
+
 On the very first build, ForgeGradle's Mavenizer decompiles Minecraft in a JVM of its own with `-Xms4G` and no
 maximum, so it may take a quarter of the machine's RAM. On a machine with little free memory that JVM is the one an
 out-of-memory killer picks (seen here as "Failed to run MCP Step (exit code 143)"). Capping every JVM the build starts
@@ -239,11 +248,13 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
    - A Minecraft bump is a port, not a bump. The renderer reaches Minecraft members by their SRG names, among them
      `f_96164_` and `f_104903_` in `Dumper.java`, `m_137550_` (Util.getMillis) and `m_7673_` (TextureManager.tick) in
      the clock agent, `f_90991_` and `f_92521_` (Minecraft.timer, Timer.msPerTick) in `ClientTicks.java`, and
-     `f_118469_`, `f_118262_` and `f_243782_` (the texture manager's tickable textures, an atlas's animated sprites,
-     a sprite ticker's sprite) in `SpriteTicks.java`. `lwjgl` in the catalog must match the new client's LWJGL, and
+     `f_118469_`, `f_118262_`, `f_243782_`, `f_244631_` and `f_244511_` (the texture manager's tickable textures,
+     an atlas's animated sprites, a sprite ticker's sprite, and a sprite's loop entry and ticks into it) in
+     `SpriteTicks.java`. `lwjgl` in the catalog must match the new client's LWJGL, and
      the build says so if it does not. The clock agent prints `Util.getMillis NOT patched` or
      `TextureManager.tick NOT gated` at exit if a name stopped matching, the game log says `client ticks keep running`
-     if the timer's did, and `every atlas tick ticks every animated sprite` if the atlases' did.
+     if the timer's did, and `every atlas tick ticks every animated sprite` if the atlases' did, and `animated sprites back on their first frame`
+     counts the sprites it could not rewind if the loop's did.
 
 3. Re-check the loop detection on the new pack: a layer is stored as one period of its animation, and the early stop
    that finds the period must agree with drawing all 400 frames. One boot records raw frame hashes, then the frame

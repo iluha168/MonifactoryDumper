@@ -3,6 +3,7 @@ package com.iluha168.monifactory.dumper;
 import com.iluha168.monifactory.faketime.FakeTime;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.SpriteContents;
+import net.minecraft.client.renderer.texture.SpriteTicker;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.texture.TextureManager;
@@ -33,12 +34,19 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * {@code getU}/{@code getU0}, a sprite blit, a block quad; the tick clears the mark). Every other sprite only counts,
  * and what the GPU shows of it stays as it is. So the pictures a recipe gets depend only on the ticks of the sprites
  * marked while it is drawn. This keeps, per recipe, the sprites whose mark it has seen at any tick so far, and each
- * tick ticks exactly those, through their own tickers, the way the atlas would: a sprite marked in this frame is
- * uploaded on the next tick, and one the recipe showed before and not now still counts. From the tick a sprite joins
- * on, it gets every tick the full walk would give it. Before that, its counter stands still instead of counting ticks
- * it uploaded nothing in, which only moves the phase an animation starts at, and that phase was never the recipe's own:
- * it is whatever the recipes before left. A sprite the recipe draws without a mark (an item model's baked quads) was
- * never uploaded by the full walk either.
+ * tick ticks exactly those, through their own tickers: a sprite marked in this frame is ticked from the next tick on,
+ * and one the recipe showed before and not now keeps ticking. Every one of those ticks is the vanilla tick, upload and
+ * all, since the sprite is marked right before it. Left to Embeddium, a sprite the frame did not draw would only
+ * count, and the next frame to draw it would show the picture of the last upload, one the loop never comes back to:
+ * frame 0 of the next recipe that used it, most of all, so the loop never closed and was cut at 40 frames. Before
+ * the tick a sprite joins on, its counter stands still, which only moves the phase an animation starts at, and that
+ * phase was never the recipe's own: it is whatever the recipes before left. Each recipe starts with every mark
+ * cleared, so a sprite the last recipe drew in its last frame is not ticked for this one. A sprite the recipe draws
+ * without a mark (an item model's baked quads) was never uploaded by the full walk either.
+ * <p>
+ * The boot's full ticks leave most counters off their pictures in the same way, so the first index (and any after a
+ * restitch) puts every animated sprite on the first entry of its loop, counter and picture: the counters are set to 0
+ * and {@code uploadFirstFrame} uploads that entry. From then on every counter moves only with its upload.
  * <p>
  * Finding the marked sprites is a walk too, but of one flag per sprite in arrays built once: 14 ns a sprite, and about
  * 9 sprites to tick, 3 to 4 s of that batch. Two boots of the same build now agree on more animated pictures, too:
@@ -54,9 +62,15 @@ final class SpriteTicks {
     private static final Field ANIMATED = ObfuscationReflectionHelper.findField(TextureAtlas.class, "f_118262_");
     /** {@code TextureAtlasSprite.createTicker}'s anonymous ticker's outer sprite. */
     private static final String TICKER_SPRITE = "f_243782_";
+    /** {@code SpriteContents.Ticker.frame} and {@code subFrame}: the entry of the loop, and the ticks spent in it. */
+    private static final String SRG_TICKER_FRAME = "f_244631_";
+    private static final String SRG_TICKER_SUB_FRAME = "f_244511_";
     private static final String EMBEDDIUM = "me.jellysquid.mods.sodium.client.";
     /** Embeddium's {@code SpriteContentsExtended.sodium$isActive}, as {@code (Object) boolean}, or null. */
-    private static final MethodHandle IS_ACTIVE = isActive();
+    private static final MethodHandle IS_ACTIVE = activity("sodium$isActive", MethodType.methodType(boolean.class));
+    /** Embeddium's {@code SpriteContentsExtended.sodium$setActive}, as {@code (Object, boolean) void}, or null. */
+    private static final MethodHandle SET_ACTIVE =
+            activity("sodium$setActive", MethodType.methodType(void.class, boolean.class));
     /** {@code SodiumClientMod.options().performance.animateOnlyVisibleTextures}, or null. */
     private static final MethodHandle ON_DEMAND = onDemand();
 
@@ -82,6 +96,8 @@ final class SpriteTicks {
         final TextureAtlas atlas;
         final List<TextureAtlasSprite.Ticker> source;
         final TextureAtlasSprite.Ticker[] tickers;
+        /** Per ticker, its sprite, or null to tick it always. */
+        final TextureAtlasSprite[] sprites;
         /** Per ticker, its sprite's contents, or null to tick it always. */
         final SpriteContents[] contents;
         final boolean[] used;
@@ -93,22 +109,54 @@ final class SpriteTicks {
             this.source = source;
             int n = source.size();
             tickers = source.toArray(TextureAtlasSprite.Ticker[]::new);
+            sprites = new TextureAtlasSprite[n];
             contents = new SpriteContents[n];
             used = new boolean[n];
             order = new int[n];
-            for (int i = 0; i < n; i++) contents[i] = contentsOf(tickers[i]);
+            for (int i = 0; i < n; i++) {
+                sprites[i] = spriteOf(tickers[i]);
+                contents[i] = sprites[i] == null ? null : sprites[i].contents();
+            }
         }
 
         void forget() {
             for (int k = 0; k < count; k++) used[order[k]] = false;
             count = 0;
         }
+
+        /** Clears every sprite's mark, which the last recipe's last frame left behind. */
+        void unmark() {
+            for (SpriteContents c : contents) {
+                if (c != null) setActive(c, false);
+            }
+        }
+
+        /**
+         * Puts every sprite back on the first entry of its loop, the counter and the GPU's picture both. Returns how
+         * many could not be: those whose ticker is not the vanilla one.
+         */
+        int rewind() {
+            atlas.bind();
+            int missed = 0;
+            for (int i = 0; i < tickers.length; i++) {
+                if (sprites[i] != null && SpriteTicks.rewind(tickers[i])) sprites[i].uploadFirstFrame();
+                else missed++;
+            }
+            return missed;
+        }
     }
 
-    /** A new recipe: no sprite is its own yet. */
+    /**
+     * A new recipe: no sprite is its own yet, and none is marked, so the sprites the recipe ticks are the ones its own
+     * frame 0 draws.
+     */
     void recipe() {
-        for (Atlas atlas : atlases) atlas.forget();
+        indexed(minecraft.getTextureManager());
         whole = wholeReason();
+        for (Atlas atlas : atlases) {
+            atlas.forget();
+            if (whole == null) atlas.unmark();
+        }
         if (whole != null && !whole.equals(loggedWhole)) {
             LOG.warn("[dumper] every atlas tick ticks every animated sprite: {}", whole);
         }
@@ -133,9 +181,16 @@ final class SpriteTicks {
             }
             if (a.count == 0) continue;
             // As TextureAtlas.cycleAnimationFrames: the uploads go to the bound texture. Each sprite writes only its
-            // own rectangle, so the order they go in doesn't matter.
+            // own rectangle, so the order they go in doesn't matter. Each is marked first, so that Embeddium lets the
+            // vanilla tick run, upload and all, even for a sprite this frame did not draw: skipping the upload would
+            // move its counter away from the picture on the GPU, and the next frame to draw it would show a picture
+            // its loop never comes back to.
             a.atlas.bind();
-            for (int k = 0; k < a.count; k++) a.tickers[a.order[k]].tickAndUpload();
+            for (int k = 0; k < a.count; k++) {
+                int i = a.order[k];
+                if (a.contents[i] != null) setActive(a.contents[i], true);
+                a.tickers[i].tickAndUpload();
+            }
             spritesTicked += a.count;
         }
         for (Tickable other : others) other.tick();
@@ -153,7 +208,7 @@ final class SpriteTicks {
      * looked for when {@link #indexed} rebuilds.
      */
     private String wholeReason() {
-        if (IS_ACTIVE == null) return "Embeddium's sprite activity is not readable";
+        if (IS_ACTIVE == null || SET_ACTIVE == null) return "Embeddium's sprite activity is not readable";
         if (ON_DEMAND == null) return "Embeddium's options are not readable";
         try {
             if (!(boolean) ON_DEMAND.invokeExact()) return "Embeddium animates textures that are not visible";
@@ -189,6 +244,15 @@ final class SpriteTicks {
                 }
             }
             indexedTickables = tickables.size();
+            // The boot's ticks let Embeddium count every sprite nothing drew without uploading it, so most counters
+            // are somewhere their picture on the GPU is not. Put both at the start of the loop once.
+            int sprites = 0, missed = 0;
+            for (Atlas atlas : atlases) {
+                sprites += atlas.tickers.length;
+                missed += atlas.rewind();
+            }
+            LOG.info("[dumper] {} animated sprites back on their first frame{}", sprites - missed,
+                    missed == 0 ? "" : ", " + missed + " not: their first frame drawn may be one they never show again");
             whole = wholeReason();
             return whole == null;
         } catch (IllegalAccessException | RuntimeException e) {
@@ -209,13 +273,44 @@ final class SpriteTicks {
         }
     }
 
-    /** The contents of the sprite {@code ticker} ticks, or null if it is not the vanilla sprite's ticker. */
-    private static SpriteContents contentsOf(TextureAtlasSprite.Ticker ticker) {
+    private static void setActive(SpriteContents contents, boolean active) {
+        try {
+            SET_ACTIVE.invokeExact((Object) contents, active);
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
+    /** The sprite {@code ticker} ticks, or null if it is not the vanilla sprite's ticker. */
+    private static TextureAtlasSprite spriteOf(TextureAtlasSprite.Ticker ticker) {
         try {
             Field sprite = ObfuscationReflectionHelper.findField(ticker.getClass(), TICKER_SPRITE);
-            return sprite.get(ticker) instanceof TextureAtlasSprite owner ? owner.contents() : null;
+            return sprite.get(ticker) instanceof TextureAtlasSprite owner ? owner : null;
         } catch (IllegalAccessException | RuntimeException e) {
             return null;
+        }
+    }
+
+    /**
+     * Sets the vanilla {@code SpriteContents.Ticker} inside {@code ticker} to the first entry of its loop, with no tick
+     * spent in it: where a fresh ticker starts, the one {@code uploadFirstFrame} uploads the picture of. The anonymous
+     * atlas ticker holds it in the one field of its type. False if it is not there or not the vanilla one.
+     */
+    private static boolean rewind(TextureAtlasSprite.Ticker ticker) {
+        try {
+            for (Field held : ticker.getClass().getDeclaredFields()) {
+                if (held.getType() != SpriteTicker.class) continue;
+                held.setAccessible(true);
+                Object inner = held.get(ticker);
+                if (inner == null || !inner.getClass().getName().equals(SpriteContents.class.getName() + "$Ticker"))
+                    return false;
+                ObfuscationReflectionHelper.findField(inner.getClass(), SRG_TICKER_FRAME).setInt(inner, 0);
+                ObfuscationReflectionHelper.findField(inner.getClass(), SRG_TICKER_SUB_FRAME).setInt(inner, 0);
+                return true;
+            }
+            return false;
+        } catch (IllegalAccessException | RuntimeException e) {
+            return false;
         }
     }
 
@@ -245,13 +340,14 @@ final class SpriteTicks {
         }
     }
 
-    private static MethodHandle isActive() {
+    /** Embeddium's {@code SpriteContentsExtended} method {@code name}, with its receiver as an Object, or null. */
+    private static MethodHandle activity(String name, MethodType type) {
         try {
             Class<?> extended = Class.forName(EMBEDDIUM + "render.texture.SpriteContentsExtended", false,
                     SpriteTicks.class.getClassLoader());
             if (!extended.isAssignableFrom(SpriteContents.class)) return null;
-            return MethodHandles.publicLookup().findVirtual(extended, "sodium$isActive",
-                    MethodType.methodType(boolean.class)).asType(MethodType.methodType(boolean.class, Object.class));
+            return MethodHandles.publicLookup().findVirtual(extended, name, type)
+                    .asType(type.insertParameterTypes(0, Object.class));
         } catch (ReflectiveOperationException | RuntimeException e) {
             return null;
         }
