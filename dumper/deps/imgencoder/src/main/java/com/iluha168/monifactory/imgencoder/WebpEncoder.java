@@ -47,7 +47,7 @@ public final class WebpEncoder {
     /**
      * The same settings without {@code exact}, for the muxer's alpha-punched crops. Their alpha 0 pixels are
      * composited away, so their colour is nobody's business, and letting libwebp pick it is worth up to 7% on a frame
-     * (the prototype's anvil and grinding sets, 36,718 B against 39,362 B with exact on).
+     * (two recorded animations of EMI's anvil and grindstone cards, 36,718 B against 39,362 B with exact on).
      */
     private final WebPWriteParam hiddenParam;
 
@@ -75,8 +75,8 @@ public final class WebpEncoder {
 
     /**
      * Encodes a frame sequence shown {@code frameMillis} apart, looping forever. Frames that never change give the
-     * still; anything else is an animated WebP from {@link AnimatedWebp}, at the effort PLAN section 4 sets for its
-     * size.
+     * still; anything else is an animated WebP from {@link AnimatedWebp}, at the effort
+     * {@link AnimatedWebp#effortFor} picks for its size.
      */
     public byte[] encode(List<Frame> frames, int frameMillis) {
         if (frames.isEmpty())

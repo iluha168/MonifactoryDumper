@@ -20,11 +20,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Checks that a format 2 artifact directory is whole (DESIGN section 4): every picture a record describes can be
- * drawn from what the artifact holds.
+ * Checks that a format 2 artifact directory is whole, as {@code dumper/FORMAT.md} describes it: every picture a record
+ * describes can be drawn from what the artifact holds.
  * <p>
- * The stills: {@code stills.json} tiles {@code stills.pak} exactly, from 0 to its last byte, and every still decodes
- * as a single WebP image of the size its row gives. The records: every non-null {@code "image"} obeys DESIGN 2.1,
+ * The stills: {@code stills.json} tiles {@code stills.pak} exactly, from 0 to its last byte, and every still decodes as
+ * a single WebP image of the size its row gives. The records: every non-null {@code "image"} obeys the format's rules,
  * which reading it through {@link Artifact#image} checks (still ids exist, the stills of a layer share a size, every
  * box lies inside the canvas, every duration is positive, there is a layer 0), and its canvas is
  * {@code (w + 8) * scale} by {@code (h + 8) * scale} for the record's display size. And {@code meta.json} agrees with

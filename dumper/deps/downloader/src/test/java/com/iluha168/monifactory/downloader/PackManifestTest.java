@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** The version check PLAN section 7 rests on: the pack's manifest decides, and the catalog pin must agree with it. */
+/** The version check artifact names rest on: the pack's manifest decides, and the catalog pin must agree with it. */
 class PackManifestTest {
     private static String manifest(String minecraft, String loaders) {
         return """

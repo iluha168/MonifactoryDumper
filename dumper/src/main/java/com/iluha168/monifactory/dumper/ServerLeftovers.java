@@ -12,7 +12,7 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
 /**
  * Lets go of what the server datapack reload leaves behind, once EMI has read the synced recipes and nothing will read
  * the server's side again. The renderer drops its own {@link DataPlane.Server}; mods keep theirs in statics. Measured
- * on Monifactory 0.13.8 (ignored/perf/REPORT.md), the live heap after EMI's reload goes from about 4.1 to 3.2 GB:
+ * on Monifactory 0.13.8, the live heap after EMI's reload goes from about 4.1 to 3.2 GB:
  * <ul>
  *   <li>the server's recipe manager (FastSuite's, 712 MB retained), which KubeJS and Thermal both hold, so it only
  *       goes once both let go;</li>

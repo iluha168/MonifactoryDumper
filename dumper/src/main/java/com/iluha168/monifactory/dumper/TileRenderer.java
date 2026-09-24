@@ -38,12 +38,11 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * Draws a recipe's layers as tiles of one offscreen target and hands back each layer's straight-alpha picture
- * (DESIGN 3.5).
+ * Draws a recipe's layers as tiles of one offscreen target and hands back each layer's straight-alpha picture.
  * <p>
  * A tile is a crop box of the recipe's canvas and something that draws. It is drawn once, over a transparent clear
  * with its blending set up by {@link BlendState} before each of its draws, or, when the caller asks, twice, over
- * opaque black and over opaque white (DESIGN 3.2). Each draw goes into its own region of the target: the box plus a
+ * opaque black and over opaque white. Each draw goes into its own region of the target: the box plus a
  * 1-pixel guard ring on every side, cleared on its own. What lands on the ring is how {@link Matte} tells that a layer
  * escaped its box. Tiles are shelf-packed ({@link TilePacking}) into power-of-two targets up to {@value #MAX_SIDE}
  * square, several passes when they don't fit one, and each pass is read back once, only the rectangle it used.
@@ -69,7 +68,7 @@ import java.util.function.Supplier;
  * the buffer and runs the alpha solve, the ring check and the hash per tile straight out of the mapped memory: big
  * tiles on the caller's executor, small ones on the render thread meanwhile. The pixels never pass through a Java
  * array: {@code glReadPixels} into one held a JNI critical section through the whole GPU wait while other threads
- * allocated, and sync plus readback cost ten times as much (REPORT 8, trap 3).
+ * allocated, and sync plus readback cost ten times as much when measured.
  * <p>
  * Ordering. Submissions alternate between the two buffers, so submission N's buffer is written again by submission
  * N + 2. Collect N before submitting N + 2; a submission overwritten first throws when collected. Collect each
@@ -79,7 +78,7 @@ import java.util.function.Supplier;
  * {@code collect} returns when all of it has.
  * <p>
  * Time. Nothing here freezes the clock or stands the player's tick. The caller wraps {@link #submit} in
- * {@link DrawTime} at the plan's {@link LayerPlan#millis()} (DESIGN 3.3): every draw of the batch, flushes included,
+ * {@link DrawTime} at the plan's {@link LayerPlan#millis()}: every draw of the batch, flushes included,
  * happens inside the call.
  * <p>
  * One renderer serves a whole run. It keeps no per-recipe state; what it holds is a few targets and the two buffers,

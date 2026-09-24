@@ -20,8 +20,8 @@ import java.util.Random;
 import static com.iluha168.monifactory.dumper.Dumper.LOG;
 
 /**
- * The raw per-frame hash sequence of a sample, written to {@code seq.csv} and nothing decided: the {@code seq} mode of
- * {@code ignored/detect/src/Seq.java}, in its file format. The loop rules (the strict period, the early stop in
+ * The raw per-frame hash sequence of a sample, written to {@code seq.csv} and nothing decided, in the format
+ * {@code CheckDetection} reads. The loop rules (the strict period, the early stop in
  * {@code FramePolicy}) are functions of these sequences, so a pack bump re-checks them offline on identical pixels
  * with {@code :dumper:compare:checkDetection}, instead of comparing boots that differ anyway.
  * <p>
@@ -47,7 +47,7 @@ final class Seq {
 
         Row(Corpus.Entry entry) {
             this.recipe = entry.recipe();
-            // The prototype's stand-in for a recipe without an id, so the offline tools can still tell rows apart.
+            // The file format's stand-in for a recipe without an id, so the offline tools can still tell rows apart.
             this.id = recipe.getId() == null ? "null#" + Integer.toHexString(System.identityHashCode(recipe))
                     : recipe.getId().toString();
             this.category = entry.category();

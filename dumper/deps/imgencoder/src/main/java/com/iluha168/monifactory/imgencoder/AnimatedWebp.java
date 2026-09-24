@@ -7,9 +7,8 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Animated lossless WebP, the container written here in Java around libwebp's still encoder. Ported from the
- * prototype {@code ignored/enc/src/AnimWebp.java} with its logic unchanged, so its measurements hold: smaller than
- * {@code img2webp -min_size} on 40 of 41 test sets and pixel-exact on all of them.
+ * Animated lossless WebP, the container written here in Java around libwebp's still encoder. On 41 recorded sets of
+ * recipe animation frames it came out smaller than {@code img2webp -min_size} on 40, and pixel-exact on all of them.
  * <p>
  * The file is RIFF with VP8X, ANIM and one ANMF per stored frame. Per frame the muxer takes the bounding box of the
  * pixels that changed since the previous frame, snaps its origin down to even (ANMF stores x and y halved), and
@@ -32,8 +31,8 @@ final class AnimatedWebp {
     }
 
     /**
-     * Above this many pixels over all frames the search is skipped (PLAN section 4's effort gate). The census's
-     * largest Policy B set was 5.34 Mpx, so the gate is for outliers.
+     * Above this many pixels over all frames the search is skipped. The largest set of frames the animation census
+     * would store for one recipe was 5.34 Mpx, so the gate is for outliers.
      */
     static final long SEARCH_LIMIT_PIXELS = 8_000_000L;
 
@@ -68,8 +67,8 @@ final class AnimatedWebp {
                 continue;
             }
             if (canvas == null) {
-                // The prototype only ever saw opaque frames and set the ALPHA flag for punched crops alone. A decoder
-                // takes the flag at its word and shows every pixel opaque without it, so any frame with alpha sets it.
+                // Punched crops alone would need the ALPHA flag if every frame were opaque. A decoder takes the flag
+                // at its word and shows every pixel opaque without it, so any frame with alpha sets it.
                 anyAlpha |= !frame.opaque();
                 keyframe = encoder.stillFile(cur, cw, ch);
                 out.add(new Stored(imageChunks(keyframe), 0, 0, cw, ch, NO_BLEND, frameMillis));

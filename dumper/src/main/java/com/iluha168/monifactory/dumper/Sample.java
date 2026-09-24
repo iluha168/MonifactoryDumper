@@ -43,8 +43,8 @@ final class Sample {
     /** How long a frame may spend drawing before it hands control back to the game loop. */
     private static final long FRAME_BUDGET_NANOS = 250_000_000L;
     /**
-     * Where the fake clock stands for every draw. Any fixed value will do; this one is the prototype's, so its renders
-     * compare.
+     * Where the fake clock stands for every draw. Any fixed value will do; this one is frame 0's in the build and the
+     * census, so renders of all three compare.
      */
     private static final long STILL_FRAME_MILLIS = 2_000_000L;
 

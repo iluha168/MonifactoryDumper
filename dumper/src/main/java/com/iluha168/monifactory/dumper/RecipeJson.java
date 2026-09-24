@@ -33,8 +33,9 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * <p>
  * Fields: {@code emiRecipeId} and {@code underlyingRecipeId} (the backing datapack recipe), each null where the recipe
  * has none; {@code cat}; {@code cls}, the EMI display class; {@code w}/{@code h}, the display size; the stack lists
- * {@code in}, {@code cats} and {@code out}; and {@code image}, the recipe's picture as layers of stills (DESIGN 2.1,
- * {@code LayeredImage}), null in a data-only artifact and for a recipe that failed to render.
+ * {@code in}, {@code cats} and {@code out}; and {@code image}, the recipe's picture as layers of stills
+ * ({@code LayeredImage}), null in a data-only artifact and for a recipe that failed to render. {@code dumper/FORMAT.md}
+ * specifies every field for readers.
  * <p>
  * A stack is one of three kinds. {@code k=s} is a concrete stack: {@code t} item or fluid, {@code id}, amount
  * {@code n}, an {@code nbt} flag and, when set, the top-level keys {@code nbtk}, a hash of the tag's text {@code nbth}
@@ -286,7 +287,7 @@ final class RecipeJson {
                 first = false;
                 json.append(str(key));
             }
-            // The hash the reference dump used, so the two compare.
+            // String.hashCode of the SNBT text: enough to tell NBT variants of one item apart.
             json.append("],\"nbth\":").append(nbt.toString().hashCode());
             enchantments(json, nbt);
         }

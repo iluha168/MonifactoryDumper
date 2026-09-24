@@ -5,7 +5,7 @@ import com.iluha168.monifactory.imgencoder.Frame;
 import java.nio.IntBuffer;
 
 /**
- * The check that decides whether a recipe's layers can stand for it (DESIGN 2.5, 3.8): their composite against the
+ * The check that decides whether a recipe's layers can stand for it: their composite against the
  * real render, {@code EmiRenderHelper.renderRecipe} at the same time and atlas state.
  * <p>
  * Only pixels the real render covers count. Where its alpha is 0 the colour is meaningless in both, and the composite

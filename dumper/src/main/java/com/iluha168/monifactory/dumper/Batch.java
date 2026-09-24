@@ -33,9 +33,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import static com.iluha168.monifactory.dumper.Dumper.LOG;
 
 /**
- * The build: every kept recipe drawn as layers (DESIGN 3), or whole where the layers do not reproduce it, with every
- * distinct still written once to {@code stills.pak} and each recipe's picture into its {@code recipes.json} record
- * (artifact format 2, DESIGN 2).
+ * The build: every kept recipe drawn as layers, or whole where the layers do not reproduce it, with every distinct
+ * still written once to {@code stills.pak} and each recipe's picture into its {@code recipes.json} record (artifact
+ * format 2, {@code dumper/FORMAT.md}).
  * <p>
  * Recipes go one at a time in corpus order, each a {@link RecipeJob} stepped until it is done; a recipe's sequence
  * may span many game frames. {@link #advance} works for about {@link #FRAME_BUDGET_NANOS} and hands the frame back.
@@ -564,7 +564,7 @@ final class Batch {
     }
 
     /**
-     * {@code render.tsv}: how each record was drawn (DESIGN 2.4), by record index (the line of {@code recipes.json},
+     * {@code render.tsv}: how each record was drawn, by record index (the line of {@code recipes.json},
      * not counting the opening bracket), plus the render thread's milliseconds on it. Diagnostics, not contract.
      */
     private void writeRenderTsv(Path file) throws IOException {

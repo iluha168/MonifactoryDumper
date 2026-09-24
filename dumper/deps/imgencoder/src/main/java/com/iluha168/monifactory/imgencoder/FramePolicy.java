@@ -1,22 +1,22 @@
 package com.iluha168.monifactory.imgencoder;
 
 /**
- * Which frames of an animated recipe get stored: PLAN section 4's Policy B, decided from the frame hashes alone.
+ * Which frames of an animated recipe get stored, decided from the frame hashes alone.
  * <p>
  * Feed it the hash of frame 0, 1, 2 and so on, one frame being 50 ms of the fake clock and one atlas tick. Once
  * {@link #offer} returns true, the recipe's loop is frames {@code 0 .. stored()-1}: its true period if it closed, or
  * the first {@link #TRIM} frames if it did not close within {@link #CAP}.
  * <p>
  * The period is the strict one: the smallest {@code p} with {@code hash[k] == hash[k+p]} for every {@code k} drawn.
- * The weaker "first frame equal to frame 0" rule stores loops one frame short wherever an animation plateaus (PLAN
- * section 4), so it is not used anywhere.
+ * The weaker "first frame equal to frame 0" rule stores loops one frame short wherever an animation plateaus, so it
+ * is not used anywhere.
  * <p>
  * Drawing all {@link #CAP} frames for every recipe would give the reference answer, and costs 400 draws a recipe.
- * This stops early, but not at the first {@code n >= 2p} the plan proposed: a progress arrow can hold still for longer
- * than it takes to see "two periods" of nothing, and over the detect/ boots that rule disagrees with the full one on
- * 286 of 2,300 sequences, nearly all a false {@code p = 1} or a short period on a plateau. So a period is accepted
+ * This stops early, but not at the first {@code n >= 2p}: a progress arrow can hold still for longer than it takes to
+ * see "two periods" of nothing, and over three recorded boots' sequences that rule disagrees with the full one on 286
+ * of 2,300, nearly all a false {@code p = 1} or a short period on a plateau. So a period is accepted
  * early only once the sequence has changed at least once, and has run two periods past that first change, and at least
- * {@link #MIN_FRAMES} frames have been drawn. At {@link #CAP} the full rule answers, guard or not. On the three detect/
+ * {@link #MIN_FRAMES} frames have been drawn. At {@link #CAP} the full rule answers, guard or not. On those three
  * boots of 656 recipes, from six start phases each, that gives the full rule's stored frames on every sequence of the
  * global-agent boot, the one that clocks the way this build does.
  */

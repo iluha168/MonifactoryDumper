@@ -6,7 +6,7 @@ import java.nio.IntBuffer;
 
 /**
  * A layer's straight-alpha picture, from one draw of it over a transparent clear or from two, over opaque black and
- * over opaque white (DESIGN 3.2).
+ * over opaque white.
  * <p>
  * One draw ({@link #unpremultiply}) leaves premultiplied colour {@code p} and, in the alpha channel, the layer's
  * transmittance {@code t} (see {@link BlendState}), so {@code a = 255 - t} and {@code c = p * 255 / a}. A channel

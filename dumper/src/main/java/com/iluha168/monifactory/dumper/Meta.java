@@ -18,16 +18,16 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 /**
- * {@code meta.json}, the artifact's description of itself (PLAN section 6, DESIGN 2.3): which pack it is of, what drew
- * it, and how. A consumer holding only the directory can tell which pack version and mode it has, which artifact
- * format, whether it is the whole corpus or a sample, whether it has images at all, and what a frame is worth. See
- * {@link Pack} for where the pack fields come from.
+ * {@code meta.json}, the artifact's description of itself ({@code dumper/FORMAT.md} lists its fields): which pack it is
+ * of, what drew it, and how. A consumer holding only the directory can tell which pack version and mode it has, which
+ * artifact format, whether it is the whole corpus or a sample, whether it has images at all, and what a frame is worth.
+ * See {@link Pack} for where the pack fields come from.
  */
 final class Meta {
     private Meta() {
     }
 
-    /** The artifact format this renderer writes: layered stills (DESIGN section 2). */
+    /** The artifact format this renderer writes: layered stills. */
     static final int FORMAT = 2;
 
     /**

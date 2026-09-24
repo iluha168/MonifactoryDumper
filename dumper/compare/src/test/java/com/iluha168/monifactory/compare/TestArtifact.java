@@ -17,8 +17,8 @@ import java.util.SplittableRandom;
 import java.util.stream.Collectors;
 
 /**
- * A small format 2 artifact written by hand, file by file, the way DESIGN section 1 lays it out, so the tools are
- * tested against the format and not against the renderer's writer. Stills are real lossless WebP from
+ * A small format 2 artifact written by hand, file by file, the way {@code dumper/FORMAT.md} lays it out, so the tools
+ * are tested against the format and not against the renderer's writer. Stills are real lossless WebP from
  * {@link WebpEncoder}.
  */
 final class TestArtifact {

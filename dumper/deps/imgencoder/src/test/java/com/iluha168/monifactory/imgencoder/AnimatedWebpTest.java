@@ -17,8 +17,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * The muxer's contract, which is {@code ignored/enc/verify.py}'s: every source frame decodes back pixel-exact at the
- * time it was shown, the durations add up to frames times the step, and the animation loops forever.
+ * The muxer's contract: every source frame decodes back pixel-exact at the time it was shown, the durations add up to
+ * frames times the step, and the animation loops forever.
  */
 class AnimatedWebpTest {
     private final WebpEncoder encoder = new WebpEncoder();
@@ -124,20 +124,22 @@ class AnimatedWebpTest {
     }
 
     /**
-     * The prototype's 41 test sets ({@code ignored/enc/work*}), opt in with {@code -Pmonifactory.enc.corpus=<dir>}.
-     * Each set is encoded the way the prototype did it (both candidates on every frame) and must match its 0.11.0
-     * output byte for byte. The port's files go to {@code -Pmonifactory.enc.out=<dir>} for {@code verify.py}, once as
-     * the prototype encoded and once through the public entry point, effort gate included.
+     * Recorded frame sets and the bytes the muxer must write for each, which are not in the repository: opt in with
+     * {@code -Pmonifactory.enc.corpus=<dir>}, whose {@code work/} and {@code work2/} hold one directory per set, with
+     * the frames as PNGs in {@code src/} and the expected file as {@code javamux_uf011.webp}, written with
+     * webp-imageio 0.11.0. Each set is encoded with both candidates on every frame and must match byte for byte. The
+     * files go to {@code -Pmonifactory.enc.out=<dir>} for any other decoder to check, once that way and once through
+     * the public entry point, effort gate included.
      */
     @Test
-    void matchesThePrototype() throws IOException {
+    void matchesTheRecordedCorpus() throws IOException {
         String corpus = System.getProperty("monifactory.enc.corpus");
         assumeTrue(corpus != null && !corpus.isBlank(), "-Pmonifactory.enc.corpus not set");
         Path out = Path.of(System.getProperty("monifactory.enc.out", "build/enc-corpus"));
         Files.createDirectories(out);
         List<String> mismatches = new ArrayList<>();
         int sets = 0;
-        StringBuilder index = new StringBuilder("label\tsrc\tstep\tframes\tbytes\tgated_bytes\tprototype_bytes\n");
+        StringBuilder index = new StringBuilder("label\tsrc\tstep\tframes\tbytes\tgated_bytes\texpected_bytes\n");
         for (String work : List.of("work", "work2")) {
             Path root = Path.of(corpus, work);
             if (!Files.isDirectory(root)) continue;
@@ -146,7 +148,7 @@ class AnimatedWebpTest {
                     Path src = set.resolve("src"), golden = set.resolve("javamux_uf011.webp");
                     if (!Files.isDirectory(src) || !Files.isRegularFile(golden)) continue;
                     String label = set.getFileName().toString();
-                    // corpus.py's steps: anim_item was captured at 31 ms and item_stack_probe at 100 ms.
+                    // The sets' capture steps: anim_item was captured at 31 ms and item_stack_probe at 100 ms.
                     int step = label.equals("anim_item") ? 31 : label.equals("item_stack_probe") ? 100 : 50;
                     List<Frame> frames = readPngs(src);
                     byte[] mine = encoder.encode(frames, step, AnimatedWebp.Effort.SEARCH);
@@ -158,7 +160,7 @@ class AnimatedWebpTest {
                             Integer.toString(frames.size()), Integer.toString(mine.length),
                             Integer.toString(gated.length), Integer.toString(theirs.length))).append('\n');
                     if (!Arrays.equals(mine, theirs))
-                        mismatches.add(label + ": " + mine.length + " B, prototype " + theirs.length + " B");
+                        mismatches.add(label + ": " + mine.length + " B, expected " + theirs.length + " B");
                     Decoded.of(mine).assertTimeline(frames, step);
                     Decoded.of(gated).assertTimeline(frames, step);
                     sets++;
@@ -167,7 +169,8 @@ class AnimatedWebpTest {
         }
         Files.writeString(out.resolve("index.tsv"), index);
         assertTrue(sets > 0, "no sets under " + corpus);
-        assertEquals(List.of(), mismatches, "port differs from the prototype on " + mismatches.size() + " of " + sets);
+        assertEquals(List.of(), mismatches,
+                "the muxer differs from the expected bytes on " + mismatches.size() + " of " + sets);
     }
 
     private static List<Frame> readPngs(Path dir) throws IOException {
@@ -259,7 +262,7 @@ class AnimatedWebpTest {
             return new Decoded(width, height, loops, canvases, durations);
         }
 
-        /** verify.py's check: each source frame is what shows at the middle of its slot. */
+        /** Each source frame is what shows at the middle of its slot. */
         void assertTimeline(List<Frame> source, int step) {
             if (canvases.size() == 1 && durations.get(0) == 0) {
                 for (Frame frame : source) WebpEncoderTest.assertPixels(frame, canvases.get(0));

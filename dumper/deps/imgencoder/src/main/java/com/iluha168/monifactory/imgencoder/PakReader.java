@@ -7,7 +7,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
-/** Reads payloads back out of {@code images.pak} by the entries {@link PakWriter} handed out. Thread-safe. */
+/** Reads payloads back out of a pack by the entries {@link PakWriter} handed out. Thread-safe. */
 public final class PakReader implements AutoCloseable {
     private final FileChannel channel;
     private final long size;

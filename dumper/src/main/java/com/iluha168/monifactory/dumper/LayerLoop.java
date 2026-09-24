@@ -11,7 +11,7 @@ import java.util.function.Supplier;
 
 /**
  * One layer's pictures over a sequence, frame 0 first, and the loop that gets stored of them: {@link FramePolicy}
- * decides how many frames from frame 0, one policy per layer (DESIGN 3.6).
+ * decides how many frames from frame 0, one policy per layer.
  * <p>
  * A picture is known by a key whose equality is the picture's: a layer's {@code StillHash}, or a whole frame's
  * 64-bit hash. The policy is offered each distinct picture's index, so it compares exactly what the keys compare.

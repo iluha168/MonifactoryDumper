@@ -24,7 +24,7 @@ dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
   meta.json        artifact format (2), pack name, version and mode, Minecraft and Forge, the renderer jar's
                    SHA-256, scale, frame policy, still and recipe counts, and whether this is the whole corpus or a
                    sample
-  categories.tsv   recipes per EMI category, and how many the section 5 exclusions dropped
+  categories.tsv   recipes per EMI category, and how many of EMI's own anvil and grindstone entries were dropped
   render.tsv       how each recipe was drawn: its layers, the animated ones, frames, and why it was drawn whole if it
                    was (diagnostics, not contract)
 dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
@@ -246,8 +246,9 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
      `TextureManager.tick NOT gated` at exit if a name stopped matching, the game log says `client ticks keep running`
      if the timer's did, and `every atlas tick ticks every animated sprite` if the atlases' did.
 
-3. Re-check the loop detection on the new pack (PLAN M4). One boot records raw frame hashes, then the frame policy
-   is checked offline on them:
+3. Re-check the loop detection on the new pack: a layer is stored as one period of its animation, and the early stop
+   that finds the period must agree with drawing all 400 frames. One boot records raw frame hashes, then the frame
+   policy is checked offline on them:
 
    ```sh
    ./gradlew :dumper:runGame -Pmonifactory.mode=seq
@@ -281,7 +282,7 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
 
 Two builds of the same pack version are not byte-identical, on purpose. GregTech does not boot the same way twice (a
 recipe conflict flicker, and slots whose content it picks per boot), and this build runs mods as shipped. So a rebuild
-is checked as a set (PLAN section 7):
+is checked as a set:
 
 ```sh
 ./gradlew :dumper:rebuildCheck

@@ -23,17 +23,17 @@ import java.util.concurrent.Executor;
 import static com.iluha168.monifactory.dumper.Dumper.LOG;
 
 /**
- * One recipe through the layered renderer (DESIGN 3), or drawn whole when that fails (DESIGN 2.5): a state machine
+ * One recipe through the layered renderer, or drawn whole when that fails: a state machine
  * the batch calls {@link #step} on until it returns true. A step is one pass or two of drawing, a few milliseconds, so
  * the batch can hand the frame back to the game loop between any two steps, even in the middle of a sequence.
  * <p>
  * <b>Frame 0.</b> The recipe is planned at {@link #BASE_MILLIS} and every layer drawn once in one submission, the
  * recorder watching each draw. A layer that drew on its guard ring gets the whole canvas as its box, and one that
- * blended in a way one draw can't capture (DESIGN 3.2) is drawn over black and white from then on; either is drawn
- * again. Boxes and ways of drawing stay what frame 0 made them for the rest of the recipe, since every still of a
- * layer must be one size. Then the real render is drawn at the same time and atlas state, and the layers composited
- * are compared with it. Layers the recorder saw read only a clock are drawn again at two other times, each with a plan
- * of its own (DESIGN 3.4), and are static if both come out as frame 0 did.
+ * blended in a way one draw can't capture ({@link BlendState}) is drawn over black and white from then on; either is
+ * drawn again. Boxes and ways of drawing stay what frame 0 made them for the rest of the recipe, since every still of a
+ * layer must be one size. Then the real render is drawn at the same time and atlas state, and the layers composited are
+ * compared with it. Layers the recorder saw read only a clock are drawn again at two other times, each with a plan of
+ * its own, and are static if both come out as frame 0 did.
  * <p>
  * <b>Sequence.</b> With any layer left animated, frame after frame gets the atlas ticked (the sprites this recipe has
  * used, {@link SpriteTicks}) and the clock moved by {@link FakeTime#FRAME_MILLIS}, a new plan, and a submission of the
@@ -53,11 +53,11 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * layered stills to the artifact. Render thread only.
  */
 final class RecipeJob {
-    /** Frame 0's clock. A whole second (DESIGN 3.4), and the census's origin, which is as good as any. */
+    /** Frame 0's clock. A whole second, and the census's origin, which is as good as any. */
     static final long BASE_MILLIS = 2_000_000L;
     /** The second clock probe's shift: far, and no multiple of any period a second or a frame would give. */
     static final long FAR_MILLIS = 999_983_777L;
-    /** Every how many sequence frames the layers are checked against the real render (DESIGN 3.8). */
+    /** Every how many sequence frames the layers are checked against the real render. */
     static final int CHECK_EVERY = 16;
 
     /** What every recipe of a run draws with. */

@@ -134,7 +134,7 @@ final class Corpus {
     }
 
     /**
-     * The anvil exclusion's assertion, from PLAN section 5, over every anvil recipe the exclusion drops: it must have
+     * The anvil exclusion's assertion, over every anvil recipe the exclusion drops: it must have
      * one output, two inputs, a first input that is the output, and an enchanted book second. Every EMI entry today
      * is (tool, book, the same tool enchanted). If one ever is not, EMI has started putting something in the category
      * the exclusion was not reviewed for, and the build stops.

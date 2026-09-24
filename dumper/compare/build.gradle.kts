@@ -30,7 +30,7 @@ tasks.test {
 }
 
 /**
- * Two builds of one pack version never match byte for byte, so this is how they are compared (PLAN section 7). Any two
+ * Two builds of one pack version never match byte for byte, so this is how they are compared: as sets. Any two
  * artifact directories: `./gradlew :dumper:compare:compareDumps -Pmonifactory.compare.a=<dir> -Pmonifactory.compare.b=<dir>`.
  * `./gradlew :dumper:rebuildCheck` is the usual way in: it builds the current pack twice and runs this on the pair.
  */
@@ -57,7 +57,7 @@ val compareDumps = tasks.register<JavaExec>("compareDumps") {
 }
 
 /**
- * Re-checks the loop detection rule offline on identical pixels (PLAN M4), from the hash sequences one boot of
+ * Re-checks the loop detection rule offline on identical pixels, from the hash sequences one boot of
  * `./gradlew :dumper:runGame -Pmonifactory.mode=seq` writes to dumper/build/render/seq.csv. Run it on every pack bump:
  * `./gradlew :dumper:compare:checkDetection [-Pmonifactory.seq=<seq.csv>[,<seq.csv>...]]`.
  */

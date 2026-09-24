@@ -5,8 +5,8 @@ import com.iluha168.monifactory.imgencoder.Frame;
 import java.util.List;
 
 /**
- * Draws layer pictures onto one canvas the way a consumer of format 2 does (DESIGN 2.2). The renderer uses it too, to
- * check its layers against the real render before it trusts them.
+ * Draws layer pictures onto one canvas the way a consumer of format 2 does ({@code dumper/FORMAT.md}). The renderer
+ * uses it too, to check its layers against the real render before it trusts them.
  * <p>
  * The first picture is layer 0, and its alpha is the result's: 0 outside its box. It is put down as it is, which is
  * what straight-alpha "over" does onto a transparent canvas, so a single translucent layer comes back unchanged. Every

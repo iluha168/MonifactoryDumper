@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class WebpEncoderTest {
     private final WebpEncoder encoder = new WebpEncoder();
 
-    // The census's smallest, median and largest card (PLAN section 4), plus sizes that stress odd edges.
+    // The animation census's smallest, median and largest card, plus sizes that stress odd edges.
     private static final List<Frame> PICTURES = List.of(
             Pictures.card(168, 52, 1),
             Pictures.card(256, 124, 2),

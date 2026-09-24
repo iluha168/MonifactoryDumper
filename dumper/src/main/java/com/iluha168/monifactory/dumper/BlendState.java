@@ -4,7 +4,7 @@ import java.util.Map;
 
 /**
  * What one draw of a layer blends with, as the game asked {@code GlStateManager} for it, and how a layer drawn once
- * over a transparent clear has to blend instead so that the target ends up holding its picture (DESIGN 3.2).
+ * over a transparent clear has to blend instead so that the target ends up holding its picture.
  * <p>
  * The target holds premultiplied colour {@code p} and, in its alpha channel, the layer's transmittance {@code t}: how
  * much of whatever lies under the layer still shows through. Cleared, {@code p = 0} and {@code t = 1}. A draw that

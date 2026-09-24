@@ -35,9 +35,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    // Opt-in check of the muxer against the prototype's 41 test sets and their encoded files, which live outside the
-    // repository: -Pmonifactory.enc.corpus=<dir holding work/ and work2/>. The port's output goes to
-    // build/enc-corpus, where ignored/enc/verify.py can decode it independently.
+    // Opt-in check of the muxer against recorded frame sets and the bytes it must write for them, which live outside
+    // the repository: -Pmonifactory.enc.corpus=<dir holding work/ and work2/>, laid out as README.md says. What the
+    // test writes goes to build/enc-corpus, where another tool can decode it independently.
     val corpus = providers.gradleProperty("monifactory.enc.corpus")
     if (corpus.isPresent) {
         inputs.dir(corpus)

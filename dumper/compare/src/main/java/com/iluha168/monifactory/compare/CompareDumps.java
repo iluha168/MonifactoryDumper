@@ -28,7 +28,7 @@ import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
- * Compares two artifact directories the way PLAN section 7 says rebuilds compare: as sets, never byte for byte.
+ * Compares two artifact directories the way rebuilds are compared: as sets, never byte for byte.
  * <p>
  * Two builds of one pack version differ, because GregTech does not boot the same way twice and the build runs it as
  * shipped. What is allowed to differ is written down, and anything else is a regression:
@@ -37,9 +37,9 @@ import java.util.regex.Pattern;
  *     GregTech resolves by identity-hash iteration order, and a recursively resolved fluid amount that varies per boot.
  *     </li>
  *     <li>The recipe set may also differ in recipes that come through TooManyRecipeViewers, and in EMI's info pages.
- *     Their counts move in every production boot measured since M1 (for example emi:info 1,052 to 1,073 and
- *     chipped:botanist_workbench 1,046 to 1,060 over eight boots), which PLAN section 5 never saw because its drift
- *     boots ran without TMRV. The cause is not diagnosed.</li>
+ *     Their counts move in every production boot measured (for example emi:info 1,052 to 1,073 and
+ *     chipped:botanist_workbench 1,046 to 1,060 over eight boots). Earlier drift measurements ran without TMRV and
+ *     never saw it. The cause is not diagnosed.</li>
  *     <li>A recipe's image may differ only if the recipe has a slot whose content the pack picks per boot: a tag (its
  *     member order is not stable), a list of options, a stack with NBT (the variant), or a GregTech multiblock's
  *     representative part. Each changed region must fit in one GUI slot. Recipes with neither id are matched by their
@@ -51,18 +51,18 @@ import java.util.regex.Pattern;
  * Records are paired by category, class and ids where a recipe has an id; recipes with neither id are paired by
  * category, class, size and content. Within a key, records with equal content pair first.
  * <p>
- * A picture is compared as its frame 0, composited from its layers (DESIGN 2.2), and it counts as animated when any
- * layer shows more than one still. Still ids differ between two builds, since they follow what each build drew first,
- * so two pictures are the same without decoding anything when their layers match box for box and timeline for
+ * A picture is compared as its frame 0, composited from its layers ({@code Compositor}), and it counts as animated when
+ * any layer shows more than one still. Still ids differ between two builds, since they follow what each build drew
+ * first, so two pictures are the same without decoding anything when their layers match box for box and timeline for
  * timeline and every still they name has the same bytes on both sides. The encoder is deterministic, so equal pixels
- * give equal bytes; only pictures that fail that are composited. Many recipes share stills (every card of a category
- * is one), so each side keeps decoded stills in a bounded cache.
+ * give equal bytes; only pictures that fail that are composited. Many recipes share stills (every card of a category is
+ * one), so each side keeps decoded stills in a bounded cache.
  * <p>
  * Usage: {@code --a <dir> --b <dir> [--out <tsv>]}. Exits 1 if anything is unexplained.
  */
 public final class CompareDumps {
     /**
-     * GregTech's recycling flicker, from the drift investigation behind PLAN section 5: the arc furnace and macerator
+     * GregTech's recycling flicker, found by comparing boots of one pack version: the arc furnace and macerator
      * recycling recipes GregTech generates, two pack recycling recipes they collide with, and two recipes that lose a
      * first-wins conflict in some boots.
      */

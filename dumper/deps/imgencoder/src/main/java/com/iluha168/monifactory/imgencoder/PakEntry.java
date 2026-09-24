@@ -1,8 +1,8 @@
 package com.iluha168.monifactory.imgencoder;
 
 /**
- * Where one payload sits in {@code images.pak}. These two numbers are the {@code offset} and {@code bytes} fields of
- * the recipe's record in {@code recipes.json} (PLAN section 6): the record points at its image, nothing is keyed.
+ * Where one payload sits in a pack such as {@code stills.pak}: the first two numbers of the still's row in
+ * {@code stills.json}.
  */
 public record PakEntry(long offset, int length) {
     public PakEntry {

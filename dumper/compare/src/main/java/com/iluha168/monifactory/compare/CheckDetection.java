@@ -14,7 +14,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Checks the build's loop detection offline, on identical pixels (PLAN section 4 and M4): one boot records raw
+ * Checks the build's loop detection offline, on identical pixels: one boot records raw
  * frame-hash sequences ({@code seq.csv}, the renderer's {@code seq} mode), and the rule is then a function of them.
  * <p>
  * {@link FramePolicy}, the early-stopping strict period the build stores loops by, is checked against the full strict
@@ -25,7 +25,7 @@ import java.util.TreeMap;
  * loop than the rule says.
  * <p>
  * Whether a layer moves at all is not decided from its frames: the renderer watches what frame 0's draw reads
- * (DESIGN 3.4), so there is nothing about it to check here.
+ * and probes a layer that only read a clock at two other times, so there is nothing about it to check here.
  * <p>
  * Usage: {@code <seq.csv>...}. Exits 1 if the policy stores different frames anywhere.
  */

@@ -23,14 +23,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * An artifact directory in format 2 (DESIGN section 1), opened for reading: its {@code meta.json}, its still table
- * and {@code stills.pak}, and a way through {@code recipes.json} one record at a time.
+ * An artifact directory in format 2 ({@code dumper/FORMAT.md}), opened for reading: its {@code meta.json}, its still
+ * table and {@code stills.pak}, and a way through {@code recipes.json} one record at a time.
  * <p>
  * Opening checks only what the rest cannot do without: that this is format 2 at all, and, for an artifact with
  * images, that {@code stills.json} parses into a {@link StillTable}. Everything else is left for
  * {@link VerifyArtifact} to find and report, so it can list every problem instead of stopping at the first.
  * <p>
- * Pictures come back as the {@code imgencoder} format types, whose constructors hold every rule of DESIGN 2.1. A
+ * Pictures come back as the {@code imgencoder} format types, whose constructors hold every rule of the format. A
  * record that breaks one does not parse, and the exception says which rule.
  */
 final class Artifact implements AutoCloseable {
@@ -154,7 +154,7 @@ final class Artifact implements AutoCloseable {
 
     /**
      * The record's picture, or null for a record without one. Throws {@link IllegalArgumentException} saying what is
-     * wrong if the {@code "image"} field is missing, malformed, or breaks a rule of DESIGN 2.1, such as a still id
+     * wrong if the {@code "image"} field is missing, malformed, or breaks a rule of the format, such as a still id
      * the table does not have or two stills of different sizes in one layer.
      */
     LayeredImage image(JsonObject record) {

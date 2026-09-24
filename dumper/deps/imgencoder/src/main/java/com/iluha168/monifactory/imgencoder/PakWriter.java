@@ -7,9 +7,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
 /**
- * Writes {@code images.pak}: every image file back to back, with no header, index, padding or alignment. The
- * recipe records hold each payload's offset and length, so the pack needs nothing else. One file instead of ~120,000
- * saves 1.71x in 4 KiB blocks and 120,000 inodes (PLAN section 6).
+ * Writes a pack such as {@code stills.pak}: every image file back to back, with no header, index, padding or
+ * alignment. {@code stills.json} holds each payload's offset and length, so the pack needs nothing else. One file
+ * instead of one per picture saves an inode each and the partly used last block: over 110,372 recipe images, loose
+ * files took 1.71 times the bytes in 4 KiB blocks.
  * <p>
  * Payloads land in call order. Appends are serialised, so encoder threads can share one writer. The pack is a pure
  * function of the append order, which is why a caller that wants rebuilds to match should append in record order.

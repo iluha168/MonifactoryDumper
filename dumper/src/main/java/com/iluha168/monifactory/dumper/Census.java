@@ -32,12 +32,12 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * kept corpus up to the target, which makes the tail size-proportional. It is drawn by identity from the corpus, so
  * recipes without an id are in it too.
  * <p>
- * Per recipe: two warm-up draws for first-use uploads, then two classifications on one frame sequence. The census that
- * PLAN section 5 quotes compared 8 phases 5 frames apart; the rule PLAN section 4 adopts compares frame 0 with frames
- * 53, 97 and 199. Both are recorded, so the old fraction and the new rule can be told apart. A recipe either calls
+ * Per recipe: two warm-up draws for first-use uploads, then two classifications on one frame sequence. The first
+ * census compared 8 phases 5 frames apart; the probe rule compares frame 0 with frames 53, 97 and 199. Both are
+ * recorded, so the first census's animated fraction and the probe rule's can be told apart. A recipe either calls
  * animated then gets a period under the strict rule: the smallest {@code p} with {@code hash[k] == hash[k+p]} for every
- * {@code k} of the frames drawn, checked at 64, 128, 256 and {@link #CAP} frames. That is the checkpoint ladder the
- * section 5 buckets came from, so they compare as well.
+ * {@code k} of the frames drawn, checked at 64, 128, 256 and {@link #CAP} frames. Those are the checkpoints the first
+ * census bucketed periods by, so its buckets compare as well.
  * <p>
  * One frame is one atlas tick and 50 ms of the fake clock, the game's own relationship, so a period in frames is the
  * true period.
@@ -50,7 +50,7 @@ final class Census {
     private static final int[] CHECKPOINTS = {64, 128, 256, CAP};
     private static final int WARM_UP = 2;
     private static final long FRAME_BUDGET_NANOS = 250_000_000L;
-    /** The prototype census's clock origin, which is as good as any. */
+    /** The first census's clock origin, which is as good as any. */
     private static final long BASE_MILLIS = 2_000_000L;
 
     private static final class Probe {

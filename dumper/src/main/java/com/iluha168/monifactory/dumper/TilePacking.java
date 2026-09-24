@@ -11,8 +11,8 @@ import java.util.List;
  * first one. The first pass takes as many as fit, the next pass the rest, and so on.
  * <p>
  * A pass then gets the shelf width that gives the smallest power-of-two target, the squarest of equals. The target's
- * size is what a pass pays for: the draw was about ten times slower in the prototype when bound to a target far
- * larger than it used, and the readback covers only {@link Pass#width} by {@link Pass#height}. Pure.
+ * size is what a pass pays for: a draw measured about ten times slower when bound to a target far larger than it
+ * used, and the readback covers only {@link Pass#width} by {@link Pass#height}. Pure.
  */
 final class TilePacking {
     private TilePacking() {

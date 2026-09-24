@@ -51,9 +51,9 @@ import java.util.stream.Collectors;
  * There is no list of mod classes. Naming the classes to patch means naming mods, and such a list is only as
  * complete as the last search for one. Instead the agent patches whatever can link: a rewritten call site references
  * FakeTime, so it goes only into classes whose module can read FakeTime's. Forge runs several module layers, and
- * an explicit module such as log4j's API reads only what it requires; a patched call there cannot link, and the
- * prototype showed that kills the JVM before Forge starts. {@link Module#canRead} is the test, and it needs no upkeep
- * when the pack changes. The Minecraft methods above are the only ones named.
+ * an explicit module such as log4j's API reads only what it requires; a patched call there cannot link, and patching
+ * log4j's {@code ReusableMessageFactory} that way kills the JVM before Forge starts. {@link Module#canRead} is the
+ * test, and it needs no upkeep when the pack changes. The Minecraft methods above are the only ones named.
  * <p>
  * Classes that are not named here and never mention currentTimeMillis or nanoTime are passed through after a raw
  * byte scan, without ASM ever parsing them.

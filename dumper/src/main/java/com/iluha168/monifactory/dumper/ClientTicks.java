@@ -21,9 +21,9 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  *   <li>GregTech's {@code GTValues.CLIENT_TIME}, counted up in its client tick event;</li>
  *   <li>the shaders' {@code GameTime} uniform, which comes from the level's game time and the partial tick.</li>
  * </ul>
- * The client tick was also 7% of the render thread's samples, and freezing it took about 2% off the batch
- * (ignored/perf/REPORT.md, run T2, whose pictures agree with a run that ticked). It happens once the batch starts: the
- * boot, the reloads and the pack's version lookup keep their ticks.
+ * The client tick was also 7% of the render thread's samples, and freezing it took about 2% off the batch (measured
+ * on a {@code sample=50} batch of 2,380 recipes, whose pictures agree with a run that ticked). It happens once the
+ * batch starts: the boot, the reloads and the pack's version lookup keep their ticks.
  * <p>
  * {@code msPerTick} is final. It is an instance field of an ordinary class, so reflection may still set it, and
  * {@code advanceTime} reads it every frame.

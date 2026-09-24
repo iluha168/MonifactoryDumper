@@ -8,22 +8,26 @@ I bet we can profit on the fact that all images are minecraft-y (pixel art), and
   `com.github.usefulness:webp-imageio` as an ordinary dependency. Nothing is built or downloaded by hand.
   A still comes out as a bare VP8L file at `cwebp -z 9` settings (lossless, quality 100, method 6), plus `exact`,
   so even the colour under alpha 0 decodes back unchanged.
-- `encode(List<Frame>, frameMillis)` is the one entry point the renderer needs. Frames that never change give the
-  still. Frames that do change give a lossless animated WebP that loops forever: `AnimatedWebp`, the Java RIFF muxer
-  ported unchanged from `ignored/enc/src/AnimWebp.java` (changed-pixel crops, two candidates per frame, identical
-  frames merged into longer durations, the 8 Mpx effort gate of PLAN section 4).
-- `FramePolicy` decides which frames of an animated recipe are stored (PLAN section 4's Policy B): the strict period
-  if it closes within 400 frames, otherwise the first 40.
-- `PakWriter` and `PakReader` handle `images.pak`: payloads back to back, no header. Each recipe record carries
-  its own `offset` and `bytes` (PLAN section 6).
-- `layered` is artifact format 2 (`ignored/layers/DESIGN.md`): `LayeredImage`, `Layer` and `Timeline` are a
-  record's `"image"` object and write it; `StillWriter` dedupes stills by `StillHash`, encodes them on the caller's
-  executor and writes `stills.pak` in id order plus `stills.json` (`StillTable`); `Compositor` draws an image at a
-  tick. Reading the JSON back is `dumper/compare`'s job, with the Gson it already has.
+- `encode(List<Frame>, frameMillis)` turns a frame sequence into one file. Frames that never change give the
+  still. Frames that do change give a lossless animated WebP that loops forever: `AnimatedWebp`, a Java RIFF muxer
+  (changed-pixel crops, two candidates per frame, identical frames merged into longer durations, and above 8 Mpx of
+  frames only the alpha-punched one). The layered renderer stores stills only, so it calls `encode(Frame)`.
+- `FramePolicy` decides which frames of an animated layer are stored: the strict period if it closes within 400
+  frames, otherwise the first 40.
+- `PakWriter` and `PakReader` handle a pack file such as `stills.pak`: payloads back to back, no header. Where each
+  payload is (a `PakEntry`) is kept outside the pack, in `stills.json`.
+- `layered` holds the types of the artifact's pictures: `LayeredImage`, `Layer` and `Timeline` are a record's
+  `"image"` object and write it; `StillWriter` dedupes stills by `StillHash`, encodes them on the caller's executor
+  and writes `stills.pak` in id order plus `stills.json` (`StillTable`); `Compositor` draws an image at a tick. Reading
+  the JSON back is `dumper/compare`'s job, with the Gson it already has. [dumper/FORMAT.md](../../FORMAT.md) is the
+  format itself, for readers in any language.
 
 `./gradlew :dumper:deps:imgencoder:test` decodes every test picture back through the fork's reader and, where it is
 installed, through `dwebp`, and fails on any pixel that differs.
 
-With `-Pmonifactory.enc.corpus=<dir holding work/ and work2/>` (the prototype's `ignored/enc`), the tests also encode
-the prototype's 41 test sets, require its exact bytes, and leave the port's files in `build/enc-corpus` for
-`ignored/enc/verify.py`.
+`-Pmonifactory.enc.corpus=<dir>` adds a regression test of the muxer against recorded sets of recipe animation frames,
+which are not in the repository. The directory holds `work/` and `work2/`, each with one directory per set: `src/`,
+the frames as PNGs in name order, 50 ms apart (31 ms for a set named `anim_item`, 100 ms for `item_stack_probe`), and
+`javamux_uf011.webp`, the bytes the muxer must write for them with both candidates on every frame. The test also
+writes each set through the public entry point, and leaves every file it wrote in `build/enc-corpus` with an
+`index.tsv` of sizes, for decoding with another tool. Without the property the test is skipped.

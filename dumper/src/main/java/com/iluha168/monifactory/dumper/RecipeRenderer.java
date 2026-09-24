@@ -278,7 +278,7 @@ final class RecipeRenderer {
     /**
      * FNV-1a over the image's pixels. Equal hashes mean equal frames, which is all animation detection asks.
      * <p>
-     * The prototype hashed {@code NativeImage.asByteArray()}, which PNG-encodes the frame through STB first and was
+     * Hashing {@code NativeImage.asByteArray()} instead would PNG-encode the frame through STB first, which measured
      * 70% of the time spent per frame. The pixels decide the same equality, since that encoding is lossless and
      * deterministic, at 2.7x the frame rate.
      */

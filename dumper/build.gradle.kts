@@ -60,10 +60,10 @@ val gameEnvironment = mapOf("ALSOFT_DRIVERS" to "null")
 
 /**
  * What one game needs, as measured on Monifactory 0.13.8 at -Xmx5G with [gameJvmFlags] and the renderer's server
- * release (ignored/perf/REPORT.md): about 8 GB resident at the boot's peak, which is over once the renderer logs that
- * it released the server side, and about 7.5 GB while it renders. Beyond the heap that is metaspace, the code cache and
- * GC structures (about 0.9 GB), and what the JVM does not see: LWJGL, the NVIDIA driver, the WebP encoders' malloc
- * arenas and thread stacks (about 1.5 GB). GPU memory is about 325 MiB a game and never the limit.
+ * release: about 8 GB resident at the boot's peak, which is over once the renderer logs that it released the server
+ * side, and about 7.5 GB while it renders. Beyond the heap that is metaspace, the code cache and GC structures (about
+ * 0.9 GB), and what the JVM does not see: LWJGL, the NVIDIA driver, the WebP encoders' malloc arenas and thread stacks
+ * (about 1.5 GB). GPU memory is about 325 MiB a game and never the limit.
  */
 object GameMemory {
     /** The heap the numbers here were measured at. */
@@ -609,10 +609,10 @@ val runGame = tasks.register<Exec>("runGame") {
     group = "modpack"
     description = "Boots the real Monifactory install, which renders into build/render and exits. Assets download on the first run."
 
-    // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 for the M1
-    // dev-versus-production diff, -Pmonifactory.mode=census for the animation census, or -Pmonifactory.mode=seq for the
-    // raw hash sequences :dumper:compare:checkDetection checks the detection rules on. The same seed picks the same
-    // recipes in any boot.
+    // A seeded sample of the corpus instead of one recipe, e.g. -Pmonifactory.sample.count=2000 to render the same
+    // recipes in two setups and diff them pixel for pixel, -Pmonifactory.mode=census for the animation census, or
+    // -Pmonifactory.mode=seq for the raw hash sequences :dumper:compare:checkDetection checks the detection rules on.
+    // The same seed picks the same recipes in any boot.
     bootRenderer(
         runMode,
         renderDir,
@@ -913,13 +913,14 @@ val verifyRebuild = tasks.register<JavaExec>("verifyRebuild") {
 rebuild.configure { finalizedBy(verifyRebuild) }
 
 /**
- * PLAN section 7: the same pack version built twice must agree as sets, recipe for recipe, and any difference must be
+ * The same pack version built twice must agree as sets, recipe for recipe, and any difference must be
  * a documented one: GregTech's flicker, the TMRV/info drift, or a pixel change inside one boot-varying slot. Byte
- * identity is not the bar, because the pack does not boot the same way twice.
+ * identity is not the bar, because the pack does not boot the same way twice. README.md's "Checking a rebuild" has
+ * the rules.
  */
 tasks.register<JavaExec>("rebuildCheck") {
     group = "verification"
-    description = "Builds the current pack version twice and compares the two artifacts under the section 7 set-based rules."
+    description = "Builds the current pack version twice and compares the two artifacts as sets."
     dependsOn(dump, rebuild, verifyDump, verifyRebuild)
 
     classpath = compareToolPath.get()

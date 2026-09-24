@@ -26,8 +26,9 @@ import java.util.List;
  * layout and may differ between builds.
  * <p>
  * Building a plan of a GregTech recipe fires the close listeners of the LDLib UI built before it
- * ({@link Ldlib#addTempWidgets}), as {@code renderRecipe} does to its own previous draw. The prototype drew frame
- * plans after a probe plan had closed them and still matched the real render. The plan keeps nothing static:
+ * ({@link Ldlib#addTempWidgets}), as {@code renderRecipe} does to its own previous draw. Frame plans drawn after a
+ * probe plan has closed them still match the real render, and {@link RecipeJob}'s checks against it would say so if
+ * they did not. The plan keeps nothing static:
  * dropping it drops its widgets.
  */
 final class LayerPlan {
