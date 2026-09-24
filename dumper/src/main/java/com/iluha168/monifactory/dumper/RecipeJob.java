@@ -35,13 +35,13 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * are compared with it. Layers the recorder saw read only a clock are drawn again at two other times, each with a plan
  * of its own (DESIGN 3.4), and are static if both come out as frame 0 did.
  * <p>
- * <b>Sequence.</b> With any layer left animated, frame after frame gets the atlas ticked and the clock moved by
- * {@link FakeTime#FRAME_MILLIS}, a new plan, and a submission of the animated layers whose {@link LayerLoop} has not
- * decided. Frame {@code k + 1} is submitted before frame {@code k} is collected, so the GPU finishes one while the
- * render thread draws the next: {@link TileRenderer}'s two pixel buffers. The price is that frame {@code k + 1} may
- * draw a layer that frame {@code k} decided, and that picture is dropped. Every {@link #CHECK_EVERY}th frame draws
- * every animated layer and the real render too, and so does the last frame drawn, whose atlas state is still the
- * current one when the sequence ends.
+ * <b>Sequence.</b> With any layer left animated, frame after frame gets the atlas ticked (the sprites this recipe has
+ * used, {@link SpriteTicks}) and the clock moved by {@link FakeTime#FRAME_MILLIS}, a new plan, and a submission of the
+ * animated layers whose {@link LayerLoop} has not decided. Frame {@code k + 1} is submitted before frame {@code k} is
+ * collected, so the GPU finishes one while the render thread draws the next: {@link TileRenderer}'s two pixel
+ * buffers. The price is that frame {@code k + 1} may draw a layer that frame {@code k} decided, and that picture is
+ * dropped. Every {@link #CHECK_EVERY}th frame draws every animated layer and the real render too, and so does the last
+ * frame drawn, whose atlas state is still the current one when the sequence ends.
  * <p>
  * <b>Fallback.</b> Any failed check, a layer that is not a plain "over", a layer that escapes its box or blends in a
  * way one draw can't capture after frame 0, a plan whose layers change, or anything thrown, and the layered result is
@@ -62,7 +62,7 @@ final class RecipeJob {
 
     /** What every recipe of a run draws with. */
     record Tools(Minecraft minecraft, TileRenderer tiles, LayerRecorder recorder, RecipeRenderer.Pipeline reference,
-                 RecipeRenderer.Pipeline whole, Executor checks, Timings timings) {
+                 RecipeRenderer.Pipeline whole, SpriteTicks sprites, Executor checks, Timings timings) {
     }
 
     /** Render-thread nanoseconds by stage, summed over a run, for the log. */
@@ -75,8 +75,10 @@ final class RecipeJob {
         long collect;
         /** Drawing the real render, waiting for it, compositing and comparing. */
         long reference;
-        /** Drawing recipes whole, for fallbacks. */
+        /** Drawing recipes whole, for fallbacks, less their atlas ticks. */
         long whole;
+        /** Ticking the atlas for sequence frames, layered or whole. */
+        long atlas;
     }
 
     enum Mode { LAYERED, FALLBACK, FAILED }
@@ -144,6 +146,7 @@ final class RecipeJob {
     RecipeJob(Tools tools, EmiRecipe recipe) {
         this.tools = tools;
         this.recipe = recipe;
+        tools.sprites().recipe();
     }
 
     /** Does the next piece of work. Returns true once the recipe is done, whichever way. */
@@ -565,7 +568,7 @@ final class RecipeJob {
      * drawn, so the loop decides one draw late, and that last draw is thrown away.
      */
     private void wholeSequence() {
-        long start = System.nanoTime();
+        long start = System.nanoTime(), atlas = tools.timings().atlas;
         try {
             RecipeRenderer.Readback frame;
             if (nextFrame < FramePolicy.CAP) {
@@ -583,7 +586,7 @@ final class RecipeJob {
             tools.whole().discard();
             finishWhole(whole.stored());
         } finally {
-            tools.timings().whole += System.nanoTime() - start;
+            tools.timings().whole += System.nanoTime() - start - (tools.timings().atlas - atlas);
         }
     }
 
@@ -632,7 +635,9 @@ final class RecipeJob {
     }
 
     private void tickAtlas() {
-        FakeTime.tickAtlas(tools.minecraft().getTextureManager()::tick);
+        long start = System.nanoTime();
+        tools.sprites().tick();
+        tools.timings().atlas += System.nanoTime() - start;
     }
 
     private String kind(int layer) {

@@ -107,6 +107,7 @@ final class Batch {
     private final TileRenderer tiles;
     private final RecipeJob.Tools tools;
     private final RecipeJob.Timings timings = new RecipeJob.Timings();
+    private final SpriteTicks sprites;
 
     /** Per record: its picture as recipes.json holds it, or null; and what render.tsv says of it. */
     private final String[] images;
@@ -162,8 +163,9 @@ final class Batch {
             }
         });
         this.tiles = new TileRenderer(minecraft, mattes);
+        this.sprites = new SpriteTicks(minecraft);
         this.tools = new RecipeJob.Tools(minecraft, tiles, new LayerRecorder(minecraft), new RecipeRenderer.Pipeline(),
-                new RecipeRenderer.Pipeline(), mattes, timings);
+                new RecipeRenderer.Pipeline(), sprites, mattes, timings);
     }
 
     private static ExecutorService pool(String name, int threads) {
@@ -502,10 +504,11 @@ final class Batch {
     private String stages() {
         long total = 0;
         for (int i = 0; i < next; i++) total += recipeNanos[i];
-        long other = total - timings.plan - timings.submit - timings.collect - timings.reference - timings.whole;
-        return String.format("%.1f s (plan %.1f, submit %.1f, collect %.1f, reference %.1f, whole %.1f, other %.1f)",
-                total / 1e9, timings.plan / 1e9, timings.submit / 1e9, timings.collect / 1e9,
-                timings.reference / 1e9, timings.whole / 1e9, other / 1e9);
+        long other = total - timings.plan - timings.submit - timings.collect - timings.reference - timings.whole
+                - timings.atlas;
+        return String.format("%.1f s (plan %.1f, submit %.1f, collect %.1f, reference %.1f, whole %.1f, atlas %.1f,"
+                        + " other %.1f)", total / 1e9, timings.plan / 1e9, timings.submit / 1e9, timings.collect / 1e9,
+                timings.reference / 1e9, timings.whole / 1e9, timings.atlas / 1e9, other / 1e9);
     }
 
     private void finish() throws IOException, InterruptedException {
@@ -527,6 +530,7 @@ final class Batch {
                 table.size(), table.bytes(), stages(), n == 0 ? 0 : sum(recipeNanos) / n / 1_000_000L, encodes.get(),
                 encodes.get() == 0 ? 0 : encodeNanos.get() / encodes.get() / 1_000_000L, encoderThreads, stalls,
                 stallNanos / 1_000_000_000L, tail);
+        LOG.info("[dumper] {}", sprites.summary());
         LOG.info("[dumper] {} layers drawn over black and white, not once, for the blend states they used: {}",
                 matteLayers, matteBlends);
         if (fallbacks.total() > 0) {

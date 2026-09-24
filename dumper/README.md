@@ -91,6 +91,16 @@ client's game ticks by making a tick last `Float.MAX_VALUE` milliseconds: the fa
 direct reads of the level's game time, GregTech's `CLIENT_TIME` or the shaders' `GameTime`, and now they stand still
 too.
 
+Every frame of an animation gets one atlas tick, and a full tick walks all 1,607 animated sprites through Embeddium's
+per-sprite hook, about 116 us, which was 15% of the render thread. Embeddium only uploads sprites something marked
+active since the last tick, so the renderer ticks just the sprites marked since the recipe started, through their own
+tickers: 9 on average, and the ticks went from 20 to 28 s of a `sample=50` batch to 3 to 4 s. A sprite's counter now
+stands still between the recipes that show it. That moves the phase a recipe's animation starts at, which was never
+fixed: it followed every frame every recipe before had drawn, so two boots whose lists differed by one animated recipe
+drew different phases from there on. Of the batch's 990 animated pictures, two boots now agree byte for byte on 779 to
+915, where they agreed on 612 or 613. Without Embeddium's marks, or with its "animate only visible textures" off, every
+tick is the full one again and the log says so.
+
 On the very first build, ForgeGradle's Mavenizer decompiles Minecraft in a JVM of its own with `-Xms4G` and no
 maximum, so it may take a quarter of the machine's RAM. On a machine with little free memory that JVM is the one an
 out-of-memory killer picks (seen here as "Failed to run MCP Step (exit code 143)"). Capping every JVM the build starts
@@ -229,10 +239,12 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
      all follow the pin.
    - A Minecraft bump is a port, not a bump. The renderer reaches Minecraft members by their SRG names, among them
      `f_96164_` and `f_104903_` in `Dumper.java`, `m_137550_` (Util.getMillis) and `m_7673_` (TextureManager.tick) in
-     the clock agent, and `f_90991_` and `f_92521_` (Minecraft.timer, Timer.msPerTick) in `ClientTicks.java`.
-     `lwjgl` in the catalog must match the new client's LWJGL, and the build says so if it does not. The clock agent
-     prints `Util.getMillis NOT patched` or `TextureManager.tick NOT gated` at exit if a name stopped matching, and
-     the game log says `client ticks keep running` if the timer's did.
+     the clock agent, `f_90991_` and `f_92521_` (Minecraft.timer, Timer.msPerTick) in `ClientTicks.java`, and
+     `f_118469_`, `f_118262_` and `f_243782_` (the texture manager's tickable textures, an atlas's animated sprites,
+     a sprite ticker's sprite) in `SpriteTicks.java`. `lwjgl` in the catalog must match the new client's LWJGL, and
+     the build says so if it does not. The clock agent prints `Util.getMillis NOT patched` or
+     `TextureManager.tick NOT gated` at exit if a name stopped matching, the game log says `client ticks keep running`
+     if the timer's did, and `every atlas tick ticks every animated sprite` if the atlases' did.
 
 3. Re-check the loop detection on the new pack (PLAN M4). One boot records raw frame hashes, then the frame policy
    is checked offline on them:
