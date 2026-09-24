@@ -46,8 +46,9 @@ import java.util.stream.Stream;
  * <li>A recipe on the spine whose owner did not see it is in no shard's records, and is left out: it is what two
  * single-game builds lose to drift too.</li>
  * </ul>
- * A key several recipes share (no ids, same stacks) is told apart by its occurrence: the second one in a list is the
- * second one in every list. All occurrences of a key hash to the same shard.
+ * The renderer gives every recipe of a list a key of its own. Should a list hold one key twice anyway, the two are
+ * told apart by occurrence: the second one in a list is the second one in every list. All occurrences of a key hash to
+ * the same shard.
  * <p>
  * The order depends only on the shards' contents and indices, never on the order they finished or are named in.
  * <p>

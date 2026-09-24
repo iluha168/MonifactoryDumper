@@ -125,11 +125,16 @@ drawing its share of the recipes, and merge what they write. The artifact is the
 place, with `latest` moved and `verifyDump` run the same way. Leave it out (or say 1) and the build is one game as
 above, with no merge.
 
-- Which game draws a recipe is a hash of what the recipe is (its category and ids, or its stacks), not its place in
-  EMI's list, since that list gains or loses a few dozen recipes from boot to boot. `sample=N` is a hash of the same
-  kind, so it picks the same recipes in every game. `count=N` is the first N of the recipes picked, split between the
-  games. `every=N` picks by place in the list, which is not the same in any two boots, so the build refuses it with
-  more than one game; use `sample=N` instead.
+- Which game draws a recipe is a hash of what the recipe is, not its place in EMI's list, since that list gains or loses
+  a few dozen recipes from boot to boot. That is its category and ids, or with no ids its stacks. Where other recipes
+  share those, it is also every stack's amount, chance and NBT and the result on its card, which tell apart
+  FramedBlocks' framing saw recipes (about 25,000 of them name nothing) and the fuels and enchantments
+  TooManyRecipeViewers lists under one id. The few recipes equal in all of that too (Thermal's disenchantment fuels,
+  each listed three times) are numbered in list order. Every recipe gets a key of its own, and a recipe no other recipe
+  resembles keeps its key when GregTech moves its amounts or NBT between boots. `sample=N` is a hash of the same kind,
+  so it picks the same recipes in every game. `count=N` is the first N of the recipes picked, split between the games.
+  `every=N` picks by place in the list, which is not the same in any two boots, so the build refuses it with more than
+  one game; use `sample=N` instead.
 - The games start one at a time: game k+1 starts once game k has logged `[dumper] released the server side`, about
   2 minutes into its boot. A boot's memory peak comes before that line, so only one game is ever at its peak. A game
   that fails or hangs before the line holds the next one back until it exits or goes 30 minutes without output, and
@@ -168,10 +173,10 @@ threads a third game shares cores with the other two.
 The staggered start costs a boot per extra game, about 2 minutes, so more games only pay off when the batch is longer
 than that. A `sample=50` build (2,381 recipes) took 4 minutes 15 seconds with one game and 5 minutes 40 seconds with
 two: game 1 started 2 minutes into game 0's run, and game 0's batch was done a minute and a half later. The games'
-render threads spent 51 ms a recipe alone and 58 ms side by side, so the whole corpus should take about an hour with
-two games against an hour and three quarters with one. The shares are not even either: a recipe's key goes with its
-game, and some keys are shared by many recipes (three framing saw keys by 134 each), so the two games got 1,300 and
-1,081 of the 2,381.
+render threads spent 51 ms a recipe alone and 58 ms side by side, so the whole corpus should take about an hour with two
+games against an hour and three quarters with one. The shares were not even either: 1,300 and 1,081 of the 2,381, since
+back then recipes that shared a key went to one game together, and three framing saw keys had 134 recipes each. With a
+key per recipe the same hash splits a data boot's `sample=50` (2,409 recipes) into 1,245 and 1,164.
 
 `rebuild` and `rebuildCheck` take `-Pmonifactory.processes` too (their games write
 `dumper/build/shards/rebuild`); `dumpData` is always one game.

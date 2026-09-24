@@ -186,8 +186,8 @@ final class RecipeJson {
      * Lays out the recipe's card the way EMI does before drawing it, and returns what sits in its result slots. Only
      * called for recipes whose {@code getOutputs()} is empty.
      */
-    private static List<EmiIngredient> resultSlots(EmiRecipe recipe, int width, int height,
-                                                   List<EmiIngredient> inputs, List<EmiIngredient> catalysts) {
+    static List<EmiIngredient> resultSlots(EmiRecipe recipe, int width, int height, List<EmiIngredient> inputs,
+                                           List<EmiIngredient> catalysts) {
         List<Widget> widgets = new ArrayList<>();
         recipe.addWidgets(new WidgetHolder() {
             @Override

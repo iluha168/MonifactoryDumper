@@ -8,7 +8,11 @@ import com.iluha168.monifactory.imgencoder.layered.StillTable;
 import com.iluha168.monifactory.imgencoder.layered.StillWriter;
 import com.iluha168.monifactory.imgencoder.layered.Timeline;
 import dev.emi.emi.api.recipe.EmiRecipe;
+import dev.emi.emi.api.stack.EmiIngredient;
+import dev.emi.emi.api.stack.EmiStack;
+import dev.emi.emi.api.stack.TagEmiIngredient;
 import net.minecraft.client.Minecraft;
+import net.minecraft.nbt.CompoundTag;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -75,8 +79,8 @@ final class Batch {
     static final String SAMPLE_PROPERTY = "monifactory.dumper.sample";
     /**
      * How many games the build runs at once ({@code -Pmonifactory.processes}), and which of them this is, from 0. Each
-     * renders the recipes whose {@link #stableKey} hashes to its index, and the build merges their artifacts. Default
-     * 1 and 0: this game renders everything.
+     * renders the recipes whose key ({@link #stableKeys}) hashes to its index, and the build merges their artifacts.
+     * Default 1 and 0: this game renders everything.
      */
     static final String SHARDS_PROPERTY = "monifactory.dumper.shards";
     static final String SHARD_PROPERTY = "monifactory.dumper.shard";
@@ -217,47 +221,57 @@ final class Batch {
             throw new IllegalArgumentException(EVERY_PROPERTY + " picks by position, which differs between the "
                     + shards + " games of a sharded build; use " + SAMPLE_PROPERTY);
         }
-        if (every > 1) {
-            List<Corpus.Entry> sample = new ArrayList<>(entries.size() / every + 1);
-            for (int i = 0; i < entries.size(); i += every) sample.add(entries.get(i));
-            LOG.warn("[dumper] taking every {}th of {} kept recipes, {} in all; the artifact is a sample", every,
-                    entries.size(), sample.size());
-            entries = sample;
-        }
         int sample = Integer.getInteger(SAMPLE_PROPERTY, 1);
         if (sample < 1) throw new IllegalArgumentException(SAMPLE_PROPERTY + " must be at least 1, not " + sample);
+        // Over the whole kept corpus: whether a recipe's identity is shared is a question about all of it.
+        List<String> keys = sample > 1 || shards > 1 ? stableKeys(entries) : null;
+        if (every > 1) {
+            List<Corpus.Entry> picked = new ArrayList<>(entries.size() / every + 1);
+            for (int i = 0; i < entries.size(); i += every) picked.add(entries.get(i));
+            LOG.warn("[dumper] taking every {}th of {} kept recipes, {} in all; the artifact is a sample", every,
+                    entries.size(), picked.size());
+            entries = picked;
+            if (keys != null) {
+                List<String> pickedKeys = new ArrayList<>(picked.size());
+                for (int i = 0; i < keys.size(); i += every) pickedKeys.add(keys.get(i));
+                keys = pickedKeys;
+            }
+        }
         if (sample > 1) {
             List<Corpus.Entry> picked = new ArrayList<>(entries.size() / sample + 1);
-            for (Corpus.Entry entry : entries) {
-                if (Long.remainderUnsigned(Sample.score(0, stableKey(entry)), sample) == 0) picked.add(entry);
+            List<String> pickedKeys = new ArrayList<>(entries.size() / sample + 1);
+            for (int i = 0; i < entries.size(); i++) {
+                if (Long.remainderUnsigned(Sample.score(0, keys.get(i)), sample) == 0) {
+                    picked.add(entries.get(i));
+                    pickedKeys.add(keys.get(i));
+                }
             }
             LOG.warn("[dumper] taking a 1-in-{} sample of {} kept recipes by recipe hash, {} in all; the artifact is"
                     + " a sample", sample, entries.size(), picked.size());
             entries = picked;
+            keys = pickedKeys;
         }
         if (limit < entries.size()) {
             LOG.warn("[dumper] taking only the first {} of {} kept recipes; the artifact is partial", limit,
                     entries.size());
             entries = entries.subList(0, limit);
+            if (keys != null) keys = keys.subList(0, limit);
         }
         int picked = entries.size();
         if (shards == 1) return new Selection(entries, picked, corpus.kept.size(), every, sample, limit, null);
 
         // After the sample and the limit, so that the shards together render what one game would have.
-        List<String> keys = new ArrayList<>(picked);
         BitSet owned = new BitSet(picked);
         List<Corpus.Entry> mine = new ArrayList<>(picked / shards + 1);
         for (int i = 0; i < picked; i++) {
-            String key = stableKey(entries.get(i));
-            keys.add(key);
-            if (Long.remainderUnsigned(Sample.score(SHARD_SEED, key), shards) == shard) {
+            if (Long.remainderUnsigned(Sample.score(SHARD_SEED, keys.get(i)), shards) == shard) {
                 owned.set(i);
                 mine.add(entries.get(i));
             }
         }
         LOG.info("[dumper] shard {} of {}: {} of the {} recipes picked", shard, shards, mine.size(), picked);
         return new Selection(mine, picked, corpus.kept.size(), every, sample, limit,
-                new Shard(shard, shards, keys, owned));
+                new Shard(shard, shards, List.copyOf(keys), owned));
     }
 
     /** Starts the build over {@link #select}'s recipes. */
@@ -282,11 +296,26 @@ final class Batch {
     }
 
     /**
+     * Every recipe's key, one each and the same in the next boot ({@link StableKeys}): its {@link #identity}, and its
+     * {@link #detail} where another recipe of the list has the same identity.
+     */
+    static List<String> stableKeys(List<Corpus.Entry> entries) {
+        long start = System.nanoTime();
+        List<String> identities = new ArrayList<>(entries.size());
+        for (Corpus.Entry entry : entries) identities.add(identity(entry));
+        StableKeys.Keys keys = StableKeys.of(identities, i -> detail(entries.get(i).recipe()));
+        LOG.info("[dumper] keyed {} recipes in {} ms: {} share their identity and are told apart by their stacks, {} of"
+                        + " those by occurrence as well", entries.size(), (System.nanoTime() - start) / 1_000_000L,
+                keys.detailed(), keys.occurrences());
+        return keys.keys();
+    }
+
+    /**
      * What a recipe is, in terms that hold from boot to boot: its category and its ids where it has any. A recipe with
      * neither id is its category, display class, size and the ids of its stacks, each list sorted and without counts
      * or NBT, since those are what the pack varies per boot (tag member order, NBT variants, GT's fluid amounts).
      */
-    static String stableKey(Corpus.Entry entry) {
+    static String identity(Corpus.Entry entry) {
         EmiRecipe recipe = entry.recipe();
         String emiId = recipe.getId() == null ? null : recipe.getId().toString();
         String underlying = null;
@@ -300,8 +329,8 @@ final class Batch {
         if (emiId != null || underlying != null) return key.append(emiId).append('|').append(underlying).toString();
         key.append(recipe.getClass().getName()).append('|').append(recipe.getDisplayWidth()).append('x')
                 .append(recipe.getDisplayHeight());
-        for (List<? extends dev.emi.emi.api.stack.EmiIngredient> list : List.of(recipe.getInputs(),
-                recipe.getCatalysts(), recipe.getOutputs())) {
+        for (List<? extends EmiIngredient> list : List.of(recipe.getInputs(), recipe.getCatalysts(),
+                recipe.getOutputs())) {
             List<String> ids = new ArrayList<>();
             for (var ingredient : list) {
                 for (var stack : ingredient.getEmiStacks()) ids.add(String.valueOf(stack.getId()));
@@ -310,6 +339,73 @@ final class Batch {
             key.append('|').append(String.join(",", ids));
         }
         return key.toString();
+    }
+
+    /**
+     * Everything {@code recipes.json} says of a recipe's stacks, for recipes whose {@link #identity} is not their own:
+     * inputs, catalysts and outputs, each stack with its amount, chance, remainder and a hash of its NBT's text, a tag
+     * by its name, and outputs off the card where the recipe lists none (see {@link RecipeJson}; the framing saw's
+     * results are only there). Each list is sorted, since some mods list a recipe's stacks in hash set order.
+     */
+    static String detail(EmiRecipe recipe) {
+        StringBuilder detail = new StringBuilder();
+        List<EmiIngredient> inputs = null, catalysts = null;
+        try {
+            inputs = recipe.getInputs();
+            detail.append("in=").append(stacks(inputs));
+        } catch (RuntimeException e) {
+            detail.append("in=?");
+        }
+        try {
+            catalysts = recipe.getCatalysts();
+            detail.append("|cats=").append(stacks(catalysts));
+        } catch (RuntimeException e) {
+            detail.append("|cats=?");
+        }
+        try {
+            List<? extends EmiIngredient> outputs = recipe.getOutputs();
+            int width = recipe.getDisplayWidth(), height = recipe.getDisplayHeight();
+            if (outputs.isEmpty() && width > 0 && height > 0) {
+                outputs = RecipeJson.resultSlots(recipe, width, height, inputs, catalysts);
+            }
+            detail.append("|out=").append(stacks(outputs));
+        } catch (RuntimeException e) {
+            detail.append("|out=?");
+        }
+        return detail.toString();
+    }
+
+    private static String stacks(List<? extends EmiIngredient> list) {
+        List<String> out = new ArrayList<>(list.size());
+        for (EmiIngredient ingredient : list) {
+            if (ingredient == null) {
+                out.add("null");
+                continue;
+            }
+            StringBuilder one = new StringBuilder();
+            if (ingredient instanceof TagEmiIngredient tag) {
+                one.append('#').append(tag.key.location());
+            } else if (ingredient instanceof EmiStack stack) {
+                one.append(stack.getId());
+                CompoundTag nbt = stack.getNbt();
+                if (nbt != null && !nbt.isEmpty()) {
+                    // Its text, not the tag, since NBT strings may hold tabs and newlines and shard.tsv may not.
+                    one.append('{').append(Long.toHexString(Sample.score(0, nbt.toString()))).append('}');
+                }
+                EmiStack remainder = stack.getRemainder();
+                if (remainder != null && !remainder.isEmpty()) one.append("->").append(remainder.getId());
+            } else {
+                List<String> ids = new ArrayList<>();
+                for (EmiStack option : ingredient.getEmiStacks()) ids.add(String.valueOf(option.getId()));
+                ids.sort(null);
+                one.append('[').append(String.join(",", ids)).append(']');
+            }
+            one.append('*').append(ingredient.getAmount());
+            if (ingredient.getChance() != 1.0f) one.append('@').append(ingredient.getChance());
+            out.add(one.toString());
+        }
+        out.sort(null);
+        return String.join(";", out);
     }
 
     /**
