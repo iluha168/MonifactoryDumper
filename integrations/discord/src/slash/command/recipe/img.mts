@@ -6,6 +6,7 @@ import { stills } from "../../../dump/stills.mts"
 import { drawRecipe, pictureToAttachment } from "../../../picture/draw.mts"
 import { unique } from "../../../iterator/unique.mts"
 import { emojis } from "../config.mts"
+import { ModeName, modes } from "../../../picture/modes.mts"
 
 export const commandRecipeImg = new SubCommand(
 	{
@@ -17,13 +18,19 @@ export const commandRecipeImg = new SubCommand(
 			description: "EMI's ID of the recipe.",
 			required: true,
 			autocomplete: true,
+		}, {
+			type: ApplicationCommandOptionTypes.String,
+			name: "animation",
+			description: "Add a fancy animation to your render!",
+			choices: Object.keys(modes).map((name) => ({ value: name, name })),
 		}],
 	},
 	{
 		id: z.string(),
+		animation: z.literal(Object.keys(modes) as ModeName[]).default("default"),
 	},
 	{
-		async run(interaction, { id }) {
+		async run(interaction, { id, animation }) {
 			if (!stills) {
 				throw new Error("Not implemented.")
 			}
@@ -39,7 +46,7 @@ export const commandRecipeImg = new SubCommand(
 
 			await interaction.defer()
 			try {
-				const drawn = await drawRecipe(await image.read(), stills)
+				const drawn = await drawRecipe(await image.read(), stills, animation)
 
 				const notes = []
 				if (matches.length > 1) notes.push(`${matches.length} recipes share this ID.`)

@@ -7,7 +7,7 @@
  */
 import { type CanvasKit, default as canvasKitModule, type Image as Still } from "canvaskit-wasm"
 import { entryAt, timeline } from "./timeline.mts"
-import * as modes from "./modes.mts"
+import { type ModeName, modes, type Plan } from "./modes.mts"
 import type { Image } from "../dump/images.mts"
 import type { Frames } from "./codec.mts"
 
@@ -16,8 +16,6 @@ import type { Frames } from "./codec.mts"
  * more is cut short. In 0.13.8 that is 4% of the pictures; 1% have over 50 million, and the most, 864 million.
  */
 const MAX_PIXELS = 25_000_000
-
-export type ModeName = keyof typeof modes
 
 /** A still as the worker gets it: the WebP file, and the size stills.json gives it. */
 export interface StillFile {
@@ -70,7 +68,11 @@ scope.onmessage = async ({ data }: MessageEvent<Job>) => {
  * its Python reference drew 560 pictures of 0.13.8, and all 560 match.
  */
 function draw(ck: CanvasKit, { image, mode, scale: upscale, frameMillis, stills }: Job): Drawn {
-	const plan = modes[mode](image)
+	const layers = image.layers.map((layer) => {
+		const { width: w, height: h } = stills.get(layer.f[0]) ?? { width: 0, height: 0 }
+		return { ...layer, w, h }
+	})
+	const plan: Plan = modes[mode]({ ...image, layers })
 	const whole = timeline(image.layers, plan.end, plan.steps)
 	const [w, h] = [image.w * upscale, image.h * upscale]
 	const count = Math.max(1, Math.min(whole.ticks.length, Math.floor(MAX_PIXELS / (w * h))))

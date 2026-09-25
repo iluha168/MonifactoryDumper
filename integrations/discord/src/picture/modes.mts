@@ -1,5 +1,5 @@
 import type { Image } from "../dump/images.mts"
-import { loopTicks } from "./timeline.mts"
+import { type Layer, loopTicks } from "./timeline.mts"
 
 /**
  * How a layer is drawn at a tick. Every field has a resting value, so `{}` draws the layer where the dump puts it. The
@@ -32,7 +32,18 @@ export interface Plan {
 	pose(i: number, tick: number): Pose | null
 }
 
-export type Mode = (image: Image) => Plan
+/** A layer along with its size in pixels: that of its stills, as stills.json gives it. */
+export interface SizedLayer extends Layer {
+	readonly w: number
+	readonly h: number
+}
+
+/** A picture as a mode sees it: every layer with its size. */
+export interface SizedImage extends Image {
+	readonly layers: readonly SizedLayer[]
+}
+
+export type Mode = (image: SizedImage) => Plan
 
 /**
  * The longest looping drawing, in ticks: 60 seconds. A picture whose layers take longer to line up again is cut there.
@@ -40,8 +51,58 @@ export type Mode = (image: Image) => Plan
  */
 const MAX_TICKS = 1200
 
-/** The picture as EMI shows it: every layer at rest, cycling its stills, until they all line up again; and over. */
-export const cycle: Mode = ({ layers }) => {
-	const whole = loopTicks(layers)
-	return { end: Math.min(whole, MAX_TICKS), loops: 0, uncut: whole > MAX_TICKS ? whole : undefined, pose: () => ({}) }
+/** Starts slow and speeds up: 0 at 0, 1 at 1. */
+function easeIn(t: number): number {
+	return t * t
 }
+
+/** Starts fast and slows down: 0 at 0, 1 at 1. */
+function easeOut(t: number): number {
+	return 1 - easeIn(1 - t)
+}
+
+const ROLL_IN_APPEAR = 10
+const ROLL_IN_ROTATE = 20
+/** A widget at least this much of the card's width or height stays put with it: it is most likely a container of others. */
+const ROLL_IN_STATIC = 0.8
+const ROLL_IN_ASPECT = 0.5
+
+export const modes = {
+	/** EMI, staying truthful to the */
+	default({ layers }) {
+		const whole = loopTicks(layers)
+		return { end: Math.min(whole, MAX_TICKS), loops: 0, uncut: whole > MAX_TICKS ? whole : undefined, pose: () => ({}) }
+	},
+	/**
+	 * Every widget rolls in over the card, one after another; then one loop of {@link modes.default}. The card, and any
+	 * widget nearly as wide or as tall as it or far from square, stay put throughout.
+	 */
+	screwIn(image) {
+		// The card is layer 0, the size of the whole picture.
+		const rolls = ({ w, h }: SizedLayer) => w < image.w * ROLL_IN_STATIC && h < image.h * ROLL_IN_STATIC && Math.max(w, h) / Math.min(w, h) - 1 <= ROLL_IN_ASPECT
+		const rolling = image.layers.keys().filter((i) => i > 0 && rolls(image.layers[i])).toArray()
+		/** The tick each rolling layer appears on, by layer. */
+		const starts = new Map(rolling.map((i, k) => [i, Math.round(ROLL_IN_APPEAR * easeIn(rolling.length > 1 ? k / (rolling.length - 1) : 0))]))
+		const intro = rolling.length ? Math.max(...starts.values()) + ROLL_IN_ROTATE : 0
+		const whole = loopTicks(image.layers)
+		return {
+			end: intro + Math.min(whole, MAX_TICKS),
+			loops: 1,
+			// Up to and with the tick the last widget settles on.
+			steps: Array.from({ length: intro + 1 }, (_, tick) => tick),
+			uncut: whole > MAX_TICKS ? intro + whole : undefined,
+
+			pose(i, tick) {
+				const start = starts.get(i)
+				if (start === undefined) return {}
+				const since = tick - start
+				if (since < 0) return null
+				if (since >= ROLL_IN_ROTATE) return {}
+				const p = easeOut(since / ROLL_IN_ROTATE)
+				return { turn: 90 * (1 - p), scale: p }
+			},
+		}
+	},
+} as const satisfies Record<string, Mode>
+
+export type ModeName = keyof typeof modes
