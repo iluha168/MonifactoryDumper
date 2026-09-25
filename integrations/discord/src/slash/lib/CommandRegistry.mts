@@ -21,15 +21,15 @@ export class CommandRegistry {
 		)
 	}
 
-	async handle(interaction: Interaction, options: unknown, subCommandName: string): Promise<void> {
+	async handle(interaction: Interaction, { name, options }: NonNullable<Interaction["data"]>): Promise<void> {
 		try {
-			const handler = this.handlers.get(subCommandName)
+			const handler = this.handlers.get(name)
 			if (!handler) {
-				return console.warn(`Unknown command "${subCommandName}"`)
+				return console.warn(`Unknown command "${name}"`)
 			}
-			await handler.handle(interaction, options)
+			await handler.handle(interaction, options ?? [])
 		} catch (e) {
-			console.error(`Application command "${subCommandName}" failed`, e)
+			console.error(`Application command "${name}" failed`, { name, options, e })
 		}
 	}
 }

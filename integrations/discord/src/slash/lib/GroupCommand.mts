@@ -1,20 +1,7 @@
-import { ApplicationCommandTypes, CreateApplicationCommand } from "discordeno"
+import { ApplicationCommandTypes, CreateApplicationCommand, InteractionDataOption } from "discordeno"
 import { SubCommand } from "./leaf/SubCommand.mts"
 import { BaseCommand, Interaction } from "./BaseCommand.mts"
-import z from "zod"
 import type { TopLevelLikeCommand } from "./CommandRegistry.mts"
-
-/**
- * They payload is an object containing one key - the name of the subcommand, and its options.
- */
-const schema = z
-	.looseObject({})
-	.transform(Object.entries)
-	.pipe(
-		z.tuple([
-			z.tuple([z.string(), z.unknown()]),
-		]).transform((entries) => entries[0]),
-	)
 
 export class GroupCommand extends BaseCommand implements TopLevelLikeCommand {
 	public readonly payload: CreateApplicationCommand
@@ -40,16 +27,15 @@ export class GroupCommand extends BaseCommand implements TopLevelLikeCommand {
 		))
 	}
 
-	async handle(interaction: Interaction, options: unknown): Promise<void> {
-		const [subCommandName, subOptions] = await schema.parseAsync(options)
-		try {
-			const handler = this.handlers.get(subCommandName)
-			if (!handler) {
-				return console.warn(`Unknown sub-command "${subCommandName}"`)
-			}
-			await handler.handle(interaction, subOptions)
-		} catch (e) {
-			console.error(`Application sub-command "${subCommandName}" failed`, e)
+	async handle(interaction: Interaction, options: InteractionDataOption[]): Promise<void> {
+		const cmd = options.at(0)
+		if (!cmd) {
+			throw new Error("No sub-command provided")
 		}
+		const handler = this.handlers.get(cmd.name)
+		if (!handler) {
+			throw new Error(`Unknown sub-command "${cmd.name}"`)
+		}
+		await handler.handle(interaction, cmd.options ?? [])
 	}
 }

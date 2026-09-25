@@ -1,4 +1,4 @@
-import { commandOptionsParser, createBot } from "discordeno"
+import { createBot } from "discordeno"
 import { exit, ExitCodes } from "./cli.mts"
 import { CommandRegistry } from "./slash/lib/CommandRegistry.mts"
 import { commandHelp } from "./slash/command/help.mts"
@@ -19,8 +19,7 @@ export const bot = createBot({
 			if (!interaction.data) {
 				throw new Error("No interaction data")
 			}
-			const options = commandOptionsParser(interaction)
-			commandRegistry.handle(interaction, options, interaction.data.name)
+			commandRegistry.handle(interaction, interaction.data)
 		},
 	},
 	token,

@@ -4,6 +4,7 @@ import { SubCommand } from "../../lib/leaf/SubCommand.mts"
 import { recipes } from "../../../dump/recipes.mts"
 import { stills } from "../../../dump/stills.mts"
 import { drawRecipe } from "../../../picture/draw.mts"
+import { unique } from "../../../iterator/unique.mts"
 
 export const commandRecipeImg = new SubCommand(
 	{
@@ -59,16 +60,18 @@ export const commandRecipeImg = new SubCommand(
 				throw e
 			}
 		},
-		autocomplete({ id, category }) {
-			return recipes
+		autocomplete({ id, category }, focus) {
+			const strings = recipes
 				.values()
 				.filter((recipe) =>
 					(!id || recipe.emiRecipeId?.includes(id.toLowerCase()))
 					&& (!category || recipe.cat.includes(category.toLowerCase()))
 				)
-				.map((recipe) => recipe.emiRecipeId)
+				.map((recipe) => focus === "id" ? recipe.emiRecipeId : recipe.cat)
 				.filter((id) => id !== null)
 				.filter((id) => id.length < 100) // Discord limit
+
+			return unique(strings)
 				.map((id) => ({
 					name: id,
 					value: id,
