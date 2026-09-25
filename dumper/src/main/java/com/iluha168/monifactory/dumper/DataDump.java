@@ -1,5 +1,7 @@
 package com.iluha168.monifactory.dumper;
 
+import net.minecraft.client.Minecraft;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -8,17 +10,21 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
 
 /**
  * The data-only artifact: {@code recipes.json} for the same recipes {@link Batch} would draw, with every
- * {@code "image"} null, plus {@code categories.tsv} and {@code meta.json}. Nothing is drawn or encoded, so the run is
- * the boot and EMI's reload and nothing else, minutes instead of the build's hours.
+ * {@code "image"} null, plus {@code categories.tsv}, {@code lang.json}, {@code matter_names.json}, {@code tags.json} and
+ * {@code meta.json}. Nothing is drawn or encoded, so the run is the boot and EMI's reload and nothing else, minutes
+ * instead of the build's hours.
  */
 final class DataDump {
     private DataDump() {
     }
 
-    static void write(Corpus corpus, Pack pack, Path output, int limit) throws IOException {
+    static void write(Minecraft minecraft, Corpus corpus, Pack pack, Tags tags, Path output, int limit)
+            throws IOException {
         long start = System.nanoTime();
         Files.createDirectories(output);
         corpus.writeCategories(output.resolve("categories.tsv"));
+        Lang.write(minecraft, output);
+        tags.write(output.resolve("tags.json"));
         Batch.Selection selection = Batch.select(corpus, limit);
         RecipeJson.writeFile(selection.entries(), new String[selection.entries().size()],
                 output.resolve("recipes.json"));

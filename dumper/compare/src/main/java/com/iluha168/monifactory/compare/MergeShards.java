@@ -59,8 +59,9 @@ import java.util.stream.Stream;
  * copied, not re-encoded.
  * <p>
  * {@code categories.tsv} and {@code corpus} in {@code meta.json} are shard 0's: they count its boot's corpus, which
- * differs from the others' by the drift. {@code meta.json} gets {@code "processes"} (the shard count) and
- * {@code "drift"}: recipes some shard's list had and another's did not.
+ * differs from the others' by the drift. {@code lang.json}, {@code matter_names.json} and {@code tags.json} are
+ * shard 0's too; they should be the same in every shard, and the merge warns of any that is not. {@code meta.json} gets
+ * {@code "processes"} (the shard count) and {@code "drift"}: recipes some shard's list had and another's did not.
  * <p>
  * Usage: {@code --out <dir> --shard <dir> [--shard <dir>...]}. {@code out} must be empty or absent. Refuses shards of
  * different packs, pack versions or modes, renderers, or selections.
@@ -72,7 +73,8 @@ public final class MergeShards {
             "every", "sample", "limit", "scale", "frameMillis", "framePolicy");
 
     /** What a merge did, as the summary prints it. */
-    record Result(int records, int stills, long stillsBytes, int sharedStills, int drift, int inserted, int lost) {
+    record Result(int records, int stills, long stillsBytes, int sharedStills, int drift, int inserted, int lost,
+                  List<String> unlike) {
     }
 
     public static void main(String[] args) throws Exception {
@@ -348,10 +350,23 @@ public final class MergeShards {
             for (String row : renderRows) render.write(row + "\n");
         }
         Files.copy(shards.get(0).directory.resolve("categories.tsv"), out.resolve("categories.tsv"));
+        // Every game reads the same packs and registers the same things, so these should be equal. This late in a
+        // build, a difference is a warning, not hours of rendering thrown away.
+        List<String> unlike = new ArrayList<>();
+        for (String file : VerifyArtifact.SHARED) {
+            Path zeroth = shards.get(0).directory.resolve(file);
+            for (Shard shard : shards.subList(1, shards.size())) {
+                if (Files.mismatch(zeroth, shard.directory.resolve(file)) != -1) {
+                    unlike.add(file + " of shard " + shard.index);
+                }
+            }
+            Files.copy(zeroth, out.resolve(file));
+        }
 
         int unused = 0;
         for (Shard shard : shards) for (int id : shard.ids) if (id < 0) unused++;
-        Result result = new Result(order.size(), stills.size(), stills.bytes(), shared, drift, inserted, lost);
+        Result result = new Result(order.size(), stills.size(), stills.bytes(), shared, drift, inserted, lost,
+                List.copyOf(unlike));
         writeMeta(shards, out, result);
 
         StringBuilder perShard = new StringBuilder();
@@ -368,6 +383,9 @@ public final class MergeShards {
         System.out.println("drift: " + drift + " recipes were not in every shard's list; " + inserted
                 + " that shard 0 did not list went in after their neighbours, " + lost
                 + " were listed but not drawn, since the shard that owns them did not list them");
+        if (!unlike.isEmpty()) {
+            System.out.println("warning: these differ from shard 0's, which the merged artifact has: " + unlike);
+        }
         return result;
     }
 

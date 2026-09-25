@@ -147,7 +147,7 @@ class MergeShardsTest {
         merge(dir.resolve("two"), s2, s0, s1);
 
         for (String file : List.of("recipes.json", "stills.pak", "stills.json", "render.tsv", "meta.json",
-                "categories.tsv")) {
+                "categories.tsv", VerifyArtifact.LANG, VerifyArtifact.MATTER_NAMES, VerifyArtifact.TAGS)) {
             assertArrayEquals(Files.readAllBytes(dir.resolve("one").resolve(file)),
                     Files.readAllBytes(dir.resolve("two").resolve(file)), file);
         }
@@ -200,6 +200,22 @@ class MergeShardsTest {
         IOException e = assertThrows(IOException.class, () -> MergeShards.merge(List.of(s0, s1), dir.resolve("out")));
         assertTrue(e.getMessage().contains("\"pack\""), e.getMessage());
         assertFalse(Files.exists(dir.resolve("out")));
+    }
+
+    @Test
+    void sharedFilesAreShardZerosAndADifferenceIsNamed() throws Exception {
+        Path s0 = new Shard(0, 3).drawn("a", 1).write(dir.resolve("0"));
+        Path s1 = new Shard(1, 3).drawn("b", 2).write(dir.resolve("1"));
+        Path s2 = new Shard(2, 3).drawn("c", 3).write(dir.resolve("2"));
+        Files.writeString(s1.resolve(VerifyArtifact.TAGS), "{}\n", StandardCharsets.UTF_8);
+        Files.writeString(s2.resolve(VerifyArtifact.LANG), "{}\n", StandardCharsets.UTF_8);
+
+        MergeShards.Result result = merge(dir.resolve("out"), s0, s1, s2);
+        assertEquals(List.of("lang.json of shard 2", "tags.json of shard 1"), result.unlike());
+        for (String file : VerifyArtifact.SHARED) {
+            assertArrayEquals(Files.readAllBytes(s0.resolve(file)), Files.readAllBytes(dir.resolve("out").resolve(file)),
+                    file);
+        }
     }
 
     @Test

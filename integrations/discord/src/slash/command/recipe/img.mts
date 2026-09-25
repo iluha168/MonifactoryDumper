@@ -5,42 +5,36 @@ import { recipes } from "../../../dump/recipes.mts"
 import { stills } from "../../../dump/stills.mts"
 import { drawRecipe } from "../../../picture/draw.mts"
 import { unique } from "../../../iterator/unique.mts"
+import { emojis } from "../config.mts"
 
 export const commandRecipeImg = new SubCommand(
 	{
 		name: "img",
-		description: "Draw a recipe as EMI shows it",
+		description: "Draw a recipe as EMI shows it.",
 		options: [{
 			type: ApplicationCommandOptionTypes.String,
 			name: "id",
 			description: "EMI's ID of the recipe.",
 			required: true,
 			autocomplete: true,
-		}, {
-			type: ApplicationCommandOptionTypes.String,
-			name: "category",
-			description: "EMI category. Use this to scope the autocomplete of other fields.",
-			autocomplete: true,
-			required: false,
 		}],
 	},
 	{
 		id: z.string(),
-		category: z.string().optional(),
 	},
 	{
-		async run(interaction, { id, category }) {
+		async run(interaction, { id }) {
 			if (!stills) {
 				throw new Error("Not implemented.")
 			}
-			const matches = recipes.filter((recipe) => recipe.emiRecipeId === id && (!category || recipe.cat === category))
+			const matches = recipes.filter((recipe) => recipe.emiRecipeId === id)
 			if (!matches.length) {
-				return interaction.respond(`<:huh:1527117723681820882> No recipe has the ID \`${id}\`.`, { isPrivate: true })
+				return interaction.respond(`${emojis.errorUser} No recipe has the ID \`${id}\`.`, { isPrivate: true })
 			}
 			const foundWithImage = matches.filter(({ image }) => image)
 			const image = foundWithImage[0]?.image
 			if (!image) {
-				return interaction.respond(`<a:thevoices:1524910664265760940> This recipe is not renderable.`, { isPrivate: true })
+				return interaction.respond(`${emojis.errorExpected} This recipe is not renderable.`, { isPrivate: true })
 			}
 
 			await interaction.defer()
@@ -52,21 +46,18 @@ export const commandRecipeImg = new SubCommand(
 				if (!drawn.seamless) notes.push(`The render was limited to ${drawn.seconds}s out of ${drawn.loopSeconds}s.`)
 
 				await interaction.edit({
-					content: notes.map((l) => `<a:blobnote:1534253408683294800> ${l}`).join("\n"),
+					content: notes.map((l) => `${emojis.info} ${l}`).join("\n"),
 					files: [{ name: drawn.name, blob: new Blob([drawn.bytes], { type: drawn.type }) }],
 				})
 			} catch (e) {
-				await interaction.edit(`<a:hyperspeedvoices:1526010011665305791> My bad, render failed.`)
+				await interaction.edit(`${emojis.errorInternal} My bad, render failed.`)
 				throw e
 			}
 		},
-		autocomplete({ id, category }, focus) {
+		autocomplete({ id }, focus) {
 			const strings = recipes
 				.values()
-				.filter((recipe) =>
-					(!id || recipe.emiRecipeId?.includes(id.toLowerCase()))
-					&& (!category || recipe.cat.includes(category.toLowerCase()))
-				)
+				.filter((recipe) => (!id || recipe.emiRecipeId?.includes(id.toLowerCase())))
 				.map((recipe) => focus === "id" ? recipe.emiRecipeId : recipe.cat)
 				.filter((id) => id !== null)
 				.filter((id) => id.length < 100) // Discord limit

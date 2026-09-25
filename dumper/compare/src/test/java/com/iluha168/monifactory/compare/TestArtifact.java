@@ -122,6 +122,12 @@ final class TestArtifact {
         Files.writeString(directory.resolve("recipes.json"), "[\n" + String.join(",\n", records) + "\n]\n",
                 StandardCharsets.UTF_8);
         Files.writeString(directory.resolve("categories.tsv"), "test:category\n", StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve(VerifyArtifact.LANG), "{\n\"item.test.stone\":\"Stone\"\n}\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve(VerifyArtifact.MATTER_NAMES), "{\n\"item\":{\n\"minecraft:stone\":\"Stone\"\n},\n"
+                + "\"fluid\":{\n\"minecraft:water\":\"Water\"\n}\n}\n", StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve(VerifyArtifact.TAGS), "{\n\"minecraft:activity\":{\n},\n\"minecraft:item\":{\n"
+                + "\"forge:stone\":[\"minecraft:stone\"],\n\"test:empty\":[]\n}\n}\n", StandardCharsets.UTF_8);
         Map<String, String> fields = new LinkedHashMap<>();
         fields.put("pack", "{\"name\":\"Test\",\"version\":\"1\",\"mode\":\"Normal\"}");
         fields.put("format", "2");

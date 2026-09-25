@@ -47,6 +47,8 @@ final class DumperOverlay extends Overlay {
     private Corpus corpus;
     /** Asked once a frame until FancyMenu has read the version, see {@link Pack}. */
     private Pack.Resolver packResolver;
+    /** Every registry's tags, taken off the server side before it goes, for the artifact; see {@link Tags}. */
+    private Tags tags;
     /** The render step's work, one frame's budget per call; true once it is done. */
     private Work work;
 
@@ -102,6 +104,7 @@ final class DumperOverlay extends Overlay {
                 }
                 server = serverReload.join();
                 serverReload = null;
+                if (job.mode().describesPack()) tags = Tags.of(server.full());
                 DataPlane.joinAndSync(minecraft, server);
                 emiSince = System.currentTimeMillis();
                 LOG.info("[dumper] recipes and tags synced; waiting for EMI's reload");
@@ -145,14 +148,15 @@ final class DumperOverlay extends Overlay {
                 if (pack == null) return Step.PACK;
                 packResolver = null;
                 work = switch (job.mode()) {
-                    case DUMP -> Batch.start(minecraft, corpus, pack, job.output(), job.count())::advance;
+                    case DUMP -> Batch.start(minecraft, corpus, pack, tags, job.output(), job.count())::advance;
                     case DATA -> {
-                        DataDump.write(corpus, pack, job.output(), job.count());
+                        DataDump.write(minecraft, corpus, pack, tags, job.output(), job.count());
                         yield () -> true;
                     }
                     default -> throw new IllegalStateException("no work for " + job.mode());
                 };
                 corpus = null;
+                tags = null;
                 if (job.mode().renders()) ClientTicks.freeze(minecraft);
                 return Step.RENDER;
             }

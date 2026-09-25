@@ -3,12 +3,14 @@ import { exit, ExitCodes } from "./cli.mts"
 import { CommandRegistry } from "./slash/lib/CommandRegistry.mts"
 import { commandHelp } from "./slash/command/help.mts"
 import { commandRecipe } from "./slash/command/recipe/index.mts"
+import { commandMatter } from "./slash/command/matter/index.mts"
 
 const token = Deno.env.get("DISCORD_BOT_TOKEN") || exit("No discord bot token set", ExitCodes.INCORRECT_ENV)
 
 const commandRegistry = new CommandRegistry(
 	commandHelp,
 	commandRecipe,
+	commandMatter,
 )
 export const bot = createBot({
 	events: {

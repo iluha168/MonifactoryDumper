@@ -1,11 +1,17 @@
 package com.iluha168.monifactory.compare;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import com.iluha168.monifactory.imgencoder.layered.Layer;
 import com.iluha168.monifactory.imgencoder.layered.LayeredImage;
 import com.iluha168.monifactory.imgencoder.layered.StillEntry;
 import com.iluha168.monifactory.imgencoder.layered.StillTable;
 
 import java.io.IOException;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -34,11 +40,25 @@ import java.util.concurrent.Future;
  * A data-only artifact, whose {@code meta.json} says {@code "images": false}, has no {@code stills.*}, null image
  * fields in its meta, and {@code "image": null} in every record.
  * <p>
+ * Both kinds have {@code lang.json}, a JSON object of strings, and {@code matter_names.json}, whose {@code item} and
+ * {@code fluid} are objects of strings, none of them empty, and {@code tags.json}, whose registries are objects of
+ * tags, each an array of ids, with item tags among them.
+ * <p>
  * A format 1 artifact is refused as a whole: it has nothing this checks.
  * <p>
  * Usage: {@code --artifact <dir> [--threads <n>]}. Exits 1 on any failure and lists the first few.
  */
 public final class VerifyArtifact {
+    /** The artifact's English translations, key to text. */
+    static final String LANG = "lang.json";
+    /** The English name of every item and fluid, by id. */
+    static final String MATTER_NAMES = "matter_names.json";
+    /** The tables of {@link #MATTER_NAMES}, in order. */
+    static final List<String> MATTER_KINDS = List.of("item", "fluid");
+    /** Every tag of every registry, with its entries. */
+    static final String TAGS = "tags.json";
+    /** Files that come from the boot, not from the recipes a game drew: the same in every game of one build. */
+    static final List<String> SHARED = List.of(LANG, MATTER_NAMES, TAGS);
     /** EMI's screenshot padding, in GUI pixels, which the picture adds to the display size. */
     static final int PADDING = 8;
 
@@ -58,6 +78,8 @@ public final class VerifyArtifact {
         try (Artifact artifact = Artifact.open(directory)) {
             if (artifact.images()) verifyImages(artifact, threads, failures);
             else verifyData(artifact, failures);
+            verifyText(artifact, failures);
+            verifyTags(artifact, failures);
             long seconds = (System.nanoTime() - started) / 1_000_000_000L;
             System.out.println("checked in " + seconds + " s; meta.json: " + artifact.meta);
         } catch (IOException e) {
@@ -172,6 +194,98 @@ public final class VerifyArtifact {
     private static void expect(Artifact artifact, List<String> failures, String key, long actual, String what) {
         Long claimed = artifact.metaNumber(key);
         if (claimed == null || claimed != actual) failures.add("meta.json says " + key + " " + claimed + ", " + what);
+    }
+
+    /**
+     * {@code lang.json}, an object of strings, and {@code matter_names.json}, whose {@code item} and {@code fluid} are
+     * objects of strings. None of the three is empty.
+     */
+    private static void verifyText(Artifact artifact, List<String> failures) throws IOException {
+        JsonObject lang = readObject(artifact.directory.resolve(LANG), failures);
+        if (lang != null && strings(LANG, lang, failures)) {
+            System.out.printf("%s: %,d translations%n", LANG, lang.size());
+        }
+        JsonObject names = readObject(artifact.directory.resolve(MATTER_NAMES), failures);
+        if (names == null) return;
+        for (String kind : MATTER_KINDS) {
+            JsonElement table = names.get(kind);
+            if (table == null || !table.isJsonObject()) {
+                failures.add(MATTER_NAMES + " has no \"" + kind + "\" object");
+            } else if (strings(MATTER_NAMES + " " + kind, table.getAsJsonObject(), failures)) {
+                System.out.printf("%s: %,d %s names%n", MATTER_NAMES, table.getAsJsonObject().size(), kind);
+            }
+        }
+        for (String key : names.keySet()) {
+            if (!MATTER_KINDS.contains(key)) {
+                failures.add(MATTER_NAMES + " has \"" + key + "\", which is no kind of matter");
+            }
+        }
+    }
+
+    /**
+     * {@code tags.json}: an object of registries, each an object of tags, each an array of entry ids. The item registry
+     * has tags; a registry may have none, and a tag may be empty.
+     */
+    private static void verifyTags(Artifact artifact, List<String> failures) throws IOException {
+        JsonObject registries = readObject(artifact.directory.resolve(TAGS), failures);
+        if (registries == null) return;
+        int tags = 0, entries = 0, before = failures.size();
+        for (Map.Entry<String, JsonElement> registry : registries.entrySet()) {
+            if (!registry.getValue().isJsonObject()) {
+                failures.add(TAGS + ": registry " + registry.getKey() + " is not an object");
+                continue;
+            }
+            for (Map.Entry<String, JsonElement> tag : registry.getValue().getAsJsonObject().entrySet()) {
+                tags++;
+                if (!tag.getValue().isJsonArray()) {
+                    failures.add(TAGS + ": " + registry.getKey() + " tag " + tag.getKey() + " is not an array");
+                    continue;
+                }
+                for (JsonElement entry : tag.getValue().getAsJsonArray()) {
+                    entries++;
+                    if (!entry.isJsonPrimitive() || !entry.getAsJsonPrimitive().isString()) {
+                        failures.add(TAGS + ": " + registry.getKey() + " tag " + tag.getKey() + " holds " + entry
+                                + ", not an id");
+                    }
+                }
+            }
+        }
+        JsonElement items = registries.get("minecraft:item");
+        if (items == null || !items.isJsonObject() || items.getAsJsonObject().isEmpty()) {
+            failures.add(TAGS + " has no item tags");
+        }
+        if (failures.size() == before) {
+            System.out.printf("%s: %,d tags of %,d registries, %,d entries%n", TAGS, tags, registries.size(), entries);
+        }
+    }
+
+    /** {@code file} parsed, if it is a JSON object; null, with a failure, if it is not. */
+    private static JsonObject readObject(Path file, List<String> failures) throws IOException {
+        if (!Files.isRegularFile(file)) {
+            failures.add("there is no " + file.getFileName());
+            return null;
+        }
+        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            JsonElement parsed = JsonParser.parseReader(reader);
+            if (parsed.isJsonObject()) return parsed.getAsJsonObject();
+            failures.add(file.getFileName() + " is not a JSON object");
+        } catch (JsonParseException e) {
+            failures.add(file.getFileName() + " does not parse: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** Whether {@code object} has keys and only string values; a failure for each way it does not. */
+    private static boolean strings(String what, JsonObject object, List<String> failures) {
+        int before = failures.size();
+        if (object.isEmpty()) failures.add(what + " is empty");
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            JsonElement value = entry.getValue();
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+                failures.add(what + ": " + entry.getKey() + " is " + value + ", not a string");
+            }
+        }
+        return failures.size() == before;
     }
 
     private static void verifyData(Artifact artifact, List<String> failures) throws IOException {

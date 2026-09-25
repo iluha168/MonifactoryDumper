@@ -25,11 +25,14 @@ stills.json      where each still is in stills.pak, and its size                
 stills.pak       every distinct still, lossless WebP, back to back               contract, full build only
 meta.json        what the artifact is: format, pack, sizes, counts              contract
 categories.tsv   every EMI category with its recipe count                       contract
+lang.json        every English translation, key to text                         contract
+matter_names.json  the English name of every item and fluid                     contract
+tags.json        every tag of every registry, with its entries                  contract
 render.tsv       how each recipe was drawn                                      diagnostics, full build only
 ```
 
-A data-only artifact has the same `recipes.json` records with every `image` null, `meta.json` saying
-`"images": false`, and `categories.tsv`. It has no `stills.*` and no `render.tsv`.
+A data-only artifact has the same `recipes.json` records with every `image` null, `meta.json` saying `"images": false`,
+`categories.tsv`, `lang.json`, `matter_names.json` and `tags.json`. It has no `stills.*` and no `render.tsv`.
 
 `meta.json` is written last. A directory without it is unfinished, whatever else it holds.
 
@@ -299,6 +302,100 @@ enchantable tool crossed with every enchantment, and the grinding one the same t
 build drops the recipes of those two categories whose display class is EMI's own (a class name starting with
 `dev.emi.emi.`). Recipes a mod registered there stay: in 0.13.8, `emi:anvil_repairing` lists 12,230 and drops 12,226,
 keeping Quark's four real repair recipes, and `emi:grinding` drops all 2,929.
+
+## lang.json
+
+Every translation the game has in English (`en_us`), as one JSON object from translation key to text:
+
+```
+{
+"block.minecraft.oak_log":"Oak Log",
+"gtceu.recipe.duration":"Duration: %s secs",
+"item.minecraft.oak_boat":"Oak Boat"
+}
+```
+
+It is what the client builds on a resource reload: every `assets/<namespace>/lang/en_us.json` in its resource packs
+(vanilla, every mod, the pack's KubeJS assets), a later pack's value replacing an earlier one's. Always English,
+whatever language the instance's `options.txt` selects. The keys are sorted by UTF-16 code unit, one entry per line
+with no indentation, so the file streams and diffs line by line like `recipes.json`. The keys cover everything a
+language file covers: items, blocks, fluids, GUI text, keybinds, menus, advancements, tooltips, and so on. Nothing ties
+a key to a record.
+
+This is not where to look up a stack's name. Mods name many items and fluids in code, with no key of their own:
+GregTech fills a template such as `tagprefix.dust` ("%s Dust") or `gtceu.fluid.liquid_generic` ("Liquid %s") with the
+material's name, and picks the template by properties of the material that are nowhere in the artifact. In 0.13.8 some
+9,900 of the item ids and 580 of the fluid ids in `recipes.json` have no `item.`, `block.` or `fluid_type.` key.
+`matter_names.json` has their names.
+
+Values are the raw text: format specifiers (`%s`, `%1$s`, `%%`) and `§` formatting codes are left in.
+
+A merged artifact has game 0's `lang.json`. Every game's should be the same; the merge warns if one is not.
+
+## matter_names.json
+
+The English name of every item and every fluid the game registers, by id, whether or not any recipe uses it. An object
+with two objects in it, `item` and `fluid`, each from id to name:
+
+```
+{
+"item":{
+"gtceu:iron_dust":"Iron Dust",
+"gtceu:polyethylene_plate":"Polyethylene Sheet",
+"minecraft:oak_log":"Oak Log"
+},
+"fluid":{
+"gtceu:acetic_acid":"Acetic Acid",
+"gtceu:iron":"Liquid Iron",
+"minecraft:water":"Water"
+}
+}
+```
+
+A name is what the game shows for the thing on its own: an item's `ItemStack.getHoverName()` for a stack of one with no
+NBT, a fluid's `FluidStack.getDisplayName()` for a bucket of it with no NBT, read in `en_us` whatever language
+`options.txt` selects. A stack with NBT may be named otherwise in game (a renamed item, a filled container). Each
+table is sorted by id and holds every entry of the registry, the empty ones included: `minecraft:air` is an item and
+`minecraft:empty` a fluid. Flowing fluids are fluids of their own, such as `minecraft:flowing_water`. Names may hold
+`§` formatting codes, as GregTech's machine names do (`"Basic Macerator §r"`). An item that has no translation is named
+by its key, as the game shows it: 67 of them in 0.13.8, test and unfinished items such as `hammerlib:test_machine`
+(`"block.hammerlib.test_machine"`). There are 27,656 items and 2,365 fluids in 0.13.8.
+
+A stack's `id` in `recipes.json` is a key of the table its `t` names. An EMI-only id such as `emi:empty` is not.
+
+A merged artifact has game 0's `matter_names.json`. Every game's should be the same; the merge warns if one is not.
+
+## tags.json
+
+Every tag of every registry the game has, with its entries: items, blocks, fluids, entity types, biomes, structures,
+damage types, every mod's registries, and the rest. An object from registry id to an object from tag id to the ids in
+the tag:
+
+```
+{
+"minecraft:block":{
+"minecraft:logs":["minecraft:oak_log","minecraft:spruce_log",...],
+...
+},
+"minecraft:item":{
+"forge:ingots/iron":["minecraft:iron_ingot"],
+...
+},
+...
+}
+```
+
+A registry id is what `reg` says of a tag in `recipes.json`, so a tag ingredient's entries are
+`tags[reg][tag]`. Registries are sorted by id, and so are the tags in each; a registry with no tags is an empty object,
+and a tag with no entries an empty array. The entries are in the tag's own order, which is not sorted: it is the order
+the tag files listed them in, a nested tag's entries where the nested tag was listed. Some mods take a tag's first
+entry for the one to make, so the order is part of what a tag says. A tag nested in another is not listed as such; its
+entries are.
+
+The tags are the server's, as its datapack reload bound them: the tags of worldgen registries, which a client never
+receives, are here too. One tag a line, so the file streams and diffs line by line.
+
+A merged artifact has game 0's `tags.json`. Every game's should be the same; the merge warns if one is not.
 
 ## render.tsv (diagnostics)
 

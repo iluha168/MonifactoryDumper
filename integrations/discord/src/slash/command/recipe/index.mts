@@ -5,7 +5,7 @@ import { commandRecipeImg } from "./img.mts"
 export const commandRecipe = new GroupCommand(
 	{
 		name: "recipe",
-		description: "View recipes",
+		description: "View recipes.",
 	},
 	...stills ? [commandRecipeImg] : [],
 )

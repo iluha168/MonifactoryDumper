@@ -277,9 +277,12 @@ final class Batch {
     }
 
     /** Starts the build over {@link #select}'s recipes. */
-    static Batch start(Minecraft minecraft, Corpus corpus, Pack pack, Path output, int limit) throws IOException {
+    static Batch start(Minecraft minecraft, Corpus corpus, Pack pack, Tags tags, Path output, int limit)
+            throws IOException {
         Files.createDirectories(output);
         corpus.writeCategories(output.resolve("categories.tsv"));
+        Lang.write(minecraft, output);
+        tags.write(output.resolve("tags.json"));
         Selection selection = select(corpus, limit);
         // Alone, every core but the render thread's and one to spare encodes. Several games share the rest: each has a
         // render thread of its own, and an encoder too many takes time from some game's render thread, which is the

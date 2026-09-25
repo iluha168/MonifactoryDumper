@@ -25,6 +25,9 @@ dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
                    SHA-256, scale, frame policy, still and recipe counts, and whether this is the whole corpus or a
                    sample
   categories.tsv   recipes per EMI category, and how many of EMI's own anvil and grindstone entries were dropped
+  lang.json        every English translation the game has, key to text, for items, fluids, GUIs, keybinds and the rest
+  matter_names.json  the English name of every registered item and fluid, by id, as the game shows it
+  tags.json        every tag of every registry, with its entries in the tag's order
   render.tsv       how each recipe was drawn: its layers, the animated ones, frames, and why it was drawn whole if it
                    was (diagnostics, not contract)
 dumper/build/dumps/latest                          a symlink to the directory the last successful dump wrote
@@ -42,8 +45,9 @@ can name.
 
 `verifyDump` runs right after and fails the build unless the stills tile `stills.pak` exactly and each decodes at the
 size `stills.json` gives, every record's picture only uses stills that exist, at one size per layer, inside a canvas of
-its recipe's size, and meta.json's counts agree. `./gradlew :dumper:compare:verifyArtifact
--Pmonifactory.artifact=<dir>` runs the same check on any directory.
+its recipe's size, meta.json's counts agree, `lang.json` and both tables of `matter_names.json` are objects of strings,
+and every tag of `tags.json` is an array of ids. `./gradlew :dumper:compare:verifyArtifact -Pmonifactory.artifact=<dir>`
+runs the same check on any directory.
 
 What it costs: a GPU with an EGL driver (about 325 MiB of its memory), about 8 GB of RAM, and an hour or two of wall
 clock on a laptop RTX 3050 with 12 hardware threads. The game boots in about 2 minutes; then the render thread spends
@@ -175,8 +179,10 @@ place, with `latest` moved and `verifyDump` run the same way. say 1 and the buil
   game 0's list; a recipe only another game's boot had goes right after the recipe before it in that game's list.
   Still ids are handed out again in record order, and a still two games both drew is stored once: equal pictures encode
   to equal WebP bytes, so the merge keeps one copy of equal bytes and copies payloads without re-encoding them.
-  `categories.tsv` and `corpus` are game 0's. meta.json says `"processes": N` and `"drift"`, how many recipes some
-  game's boot listed and another's did not, and the merge prints the same with how many of those were drawn.
+  `categories.tsv` and `corpus` are game 0's. So are `lang.json`, `matter_names.json` and `tags.json`, which should be
+  the same in every game; the merge warns of one that is not. meta.json says `"processes": N` and `"drift"`, how many
+  recipes some game's boot listed and another's did not, and the merge prints the same with how many of those were
+  drawn.
 - The shards merge in whatever order they finished; the result depends only on what they hold.
 
 Memory is the limit. At the default 5G heap, N staggered games want about 7.5 GB for each game rendering and 8 GB for
@@ -214,12 +220,16 @@ dumper/build/dumps/<pack name>-<pack version>-data/     e.g. Monifactory-0.13.8-
   recipes.json     every recipe, one JSON record per line, with null image fields
   meta.json        as for the full build, with "images": false and the image fields null
   categories.tsv   as for the full build
+  lang.json        as for the full build
+  matter_names.json  as for the full build
+  tags.json        as for the full build
 ```
 
 [FORMAT.md](FORMAT.md) covers this kind of artifact too.
 
 `verifyDumpData` runs right after and fails the build unless every `recipes.json` line parses, no record claims an
-image, there are no `stills.*`, and meta.json counts the same recipes. `every=N`, `sample=N` and `count` work as they
+image, there are no `stills.*`, meta.json counts the same recipes, `lang.json` and both tables of `matter_names.json`
+are objects of strings, and every tag of `tags.json` is an array of ids. `every=N`, `sample=N` and `count` work as they
 do for the full build, and mark the artifact `"partial": true` the same way.
 
 ## Updating to a new pack version

@@ -45,8 +45,9 @@ public final class Dumper {
          */
         DUMP,
         /**
-         * The build's {@code recipes.json}, {@code categories.tsv} and {@code meta.json} without any images, see
-         * {@link DataDump}. Takes {@code count}, {@code every} and {@code sample} the way the build does.
+         * The build's {@code recipes.json}, {@code categories.tsv}, {@code lang.json}, {@code matter_names.json},
+         * {@code tags.json} and {@code meta.json} without any images, see {@link DataDump}. Takes {@code count},
+         * {@code every} and {@code sample} the way the build does.
          */
         DATA,
         /** A seeded sample rendered to PNGs with a manifest, see {@link Sample}. */

@@ -823,7 +823,7 @@ val latestDataDump = dumpsDir.get().dir("latest-data")
 
 val dumpData = tasks.register<Exec>("dumpData") {
     group = "modpack"
-    description = "Boots the pack and writes recipes.json, categories.tsv and meta.json without rendering anything, into build/dumps/<pack>-<version>-data."
+    description = "Boots the pack and writes recipes.json, categories.tsv, lang.json, matter_names.json, tags.json and meta.json without rendering anything, into build/dumps/<pack>-<version>-data."
 
     bootRenderer("data", dataArtifactDir, *rendererSettings.toTypedArray())
     dumpInputs()

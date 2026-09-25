@@ -72,6 +72,57 @@ class VerifyArtifactTest {
     }
 
     @Test
+    void missingLangFails() throws Exception {
+        Path written = valid().write(dir);
+        Files.delete(written.resolve(VerifyArtifact.LANG));
+        assertFailure(verify(written), "no " + VerifyArtifact.LANG);
+    }
+
+    @Test
+    void langValueThatIsNotAStringFails() throws Exception {
+        Path written = valid().write(dir);
+        Files.writeString(written.resolve(VerifyArtifact.LANG), "{\"a\":\"A\",\"b\":{\"c\":\"C\"}}\n",
+                StandardCharsets.UTF_8);
+        assertFailure(verify(written), VerifyArtifact.LANG, "b is", "not a string");
+    }
+
+    @Test
+    void missingMatterNamesFails() throws Exception {
+        Path written = valid().write(dir);
+        Files.delete(written.resolve(VerifyArtifact.MATTER_NAMES));
+        assertFailure(verify(written), "no " + VerifyArtifact.MATTER_NAMES);
+    }
+
+    @Test
+    void matterNamesWithoutFluidsFail() throws Exception {
+        Path written = valid().write(dir);
+        Files.writeString(written.resolve(VerifyArtifact.MATTER_NAMES), "{\"item\":{\"minecraft:stone\":\"Stone\"},"
+                + "\"fluid\":{},\"gas\":{}}\n", StandardCharsets.UTF_8);
+        List<String> failures = verify(written);
+        assertFailure(failures, VerifyArtifact.MATTER_NAMES, "fluid is empty");
+        assertFailure(failures, VerifyArtifact.MATTER_NAMES, "\"gas\"");
+    }
+
+    @Test
+    void missingTagsFail() throws Exception {
+        Path written = valid().write(dir);
+        Files.delete(written.resolve(VerifyArtifact.TAGS));
+        assertFailure(verify(written), "no " + VerifyArtifact.TAGS);
+    }
+
+    @Test
+    void malformedTagsFail() throws Exception {
+        Path written = valid().write(dir);
+        Files.writeString(written.resolve(VerifyArtifact.TAGS), "{\"minecraft:block\":{\"test:a\":[1],\"test:b\":\"x\"},"
+                + "\"minecraft:fluid\":[]}\n", StandardCharsets.UTF_8);
+        List<String> failures = verify(written);
+        assertFailure(failures, VerifyArtifact.TAGS, "test:a holds 1");
+        assertFailure(failures, VerifyArtifact.TAGS, "test:b is not an array");
+        assertFailure(failures, VerifyArtifact.TAGS, "minecraft:fluid is not an object");
+        assertFailure(failures, VerifyArtifact.TAGS, "no item tags");
+    }
+
+    @Test
     void unknownStillIdFails() throws Exception {
         TestArtifact artifact = valid();
         artifact.recipe("stray", W, H, image(canvas(W), canvas(H), layer(0, 0, 0), layer(2, 2, 99)));
