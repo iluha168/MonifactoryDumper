@@ -46,7 +46,8 @@ class ClockAgentTest {
     private static final List<String> HOOKED = List.of("net.minecraft.Util", "net.minecraft.world.level.Level",
             "com.mojang.blaze3d.Blaze3D", "com.mojang.blaze3d.systems.RenderSystem",
             "com.mojang.blaze3d.vertex.BufferUploader", "com.mojang.blaze3d.platform.GlStateManager",
-            "net.minecraft.client.gui.Font", "net.minecraft.client.renderer.entity.ItemRenderer");
+            "net.minecraft.client.gui.Font", "net.minecraft.client.renderer.entity.ItemRenderer",
+            "net.minecraftforge.client.extensions.common.IClientFluidTypeExtensions");
 
     @BeforeAll
     static void layer() throws Exception {
@@ -250,7 +251,8 @@ class ClockAgentTest {
                 "GlStateManager._blendFunc", "GlStateManager._blendFuncSeparate", "GlStateManager._blendEquation",
                 "GlStateManager._colorMask", "GlStateManager._enableColorLogicOp",
                 "GlStateManager._disableColorLogicOp", "Font.drawInBatch(String)", "Font.drawInBatch(String,bidi)",
-                "Font.drawInBatch(Component)", "Font.drawInBatch(FormattedCharSequence)", "ItemRenderer.render")) {
+                "Font.drawInBatch(Component)", "Font.drawInBatch(FormattedCharSequence)", "ItemRenderer.render",
+                "IClientFluidTypeExtensions.of(Fluid)")) {
             assertTrue(summary.contains(part), part + " missing from " + summary);
         }
         assertFalse(summary.contains("NOT"), summary);
@@ -375,8 +377,15 @@ class ClockAgentTest {
         Object context = contextType.getEnumConstants()[0];
         Class<?> poseType = fixture("com.mojang.blaze3d.vertex.PoseStack");
         Object pose = poseType.getConstructor().newInstance();
+        Class<?> modelType = fixture("net.minecraft.client.resources.model.BakedModel");
+        Object model = Proxy.newProxyInstance(loader, new Class<?>[]{modelType}, (proxy, method, args) -> null);
         Method renderItem = itemRenderer.getMethod("m_115143_", stackType, contextType, boolean.class, poseType,
-                buffers, int.class, int.class, fixture("net.minecraft.client.resources.model.BakedModel"));
+                buffers, int.class, int.class, modelType);
+
+        Class<?> fluidType = fixture("net.minecraft.world.level.material.Fluid");
+        Object fluid = fluidType.getConstructor().newInstance();
+        Method fluidLook = fixture("net.minecraftforge.client.extensions.common.IClientFluidTypeExtensions")
+                .getMethod("of", fluidType);
 
         Method glfwTime = fixture("com.mojang.blaze3d.Blaze3D").getMethod("m_83640_");
         Method shaderTime = fixture("com.mojang.blaze3d.systems.RenderSystem").getMethod("getShaderGameTime");
@@ -388,7 +397,8 @@ class ClockAgentTest {
                 List.of("text", "hi", 1f, 2f, 0xABCDEF, matrix),
                 List.of("text", text, 3f, 4f, 5, matrix),
                 Arrays.asList("text", null, 3f, 4f, 5, matrix),
-                List.of("item", stack, context, pose),
+                List.of("item", stack, context, pose, model),
+                List.of("fluid", fluid),
                 List.of("time", FakeTime.TIME_GLFW),
                 List.of("time", FakeTime.TIME_SHADER_GAME));
         return () -> {
@@ -396,7 +406,8 @@ class ClockAgentTest {
             drawElements.invoke(null, 4, 6, 5125, 0L);
             drawString.invoke(fontInstance, "hi", 1f, 2f, 0xABCDEF, true, matrix, null, normal, 0, 0xF000F0);
             drawComponent.invoke(fontInstance, text, 3f, 4f, 5, false, matrix, null, normal, 0, 0xF000F0);
-            renderItem.invoke(items, stack, context, false, pose, null, 0xF000F0, 0, null);
+            renderItem.invoke(items, stack, context, false, pose, null, 0xF000F0, 0, model);
+            fluidLook.invoke(null, fluid);
             glfwTime.invoke(null);
             shaderTime.invoke(null);
         };

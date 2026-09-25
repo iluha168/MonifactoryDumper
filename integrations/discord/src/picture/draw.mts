@@ -3,6 +3,7 @@ import type { Drawn, Job, ModeName, Reply, StillFile } from "./draw.worker.mts"
 import type { StillTable } from "../dump/stills.mts"
 import type { Image } from "../dump/images.mts"
 import { dumpMeta } from "../dump/meta.mts"
+import type { Layer } from "./timeline.mts"
 
 export interface Drawing {
 	readonly name: string
@@ -15,11 +16,26 @@ export interface Drawing {
 	readonly loopSeconds: number
 }
 
+/** `picture` as a file of a message. */
+export function pictureToAttachment({ name, type, bytes }: Drawing) {
+	return { name, blob: new Blob([bytes], { type }) }
+}
+
 /**
- * The recipe drawn by `mode` as a WebP. A worker of its own draws the frames (see draw.worker.mts), so that the bot
+ * One layer of a recipe on its own, such as an item's slot (see widgets in stillUses.mts), drawn as its recipe has it,
+ * `scale` times its size.
+ */
+export async function drawWidget({ f, d }: Layer, stills: StillTable, scale = 1): Promise<Drawing> {
+	const image = { w: stills.width(f[0]), h: stills.height(f[0]), layers: [{ x: 0, y: 0, f, d }] }
+	return { ...await drawRecipe(image, stills, "cycle", scale), name: "widget.webp" }
+}
+
+/**
+ * The recipe drawn by `mode` as a WebP, `scale` times its size: a whole number, each pixel a square of them. A worker of its own draws the frames (see draw.worker.mts), so that the bot
  * keeps answering other interactions meanwhile; sharp then encodes them on its own threads.
  */
-export async function drawRecipe(image: Image, stills: StillTable, mode: ModeName = "cycle"): Promise<Drawing> {
+export async function drawRecipe(image: Image, stills: StillTable, mode: ModeName = "cycle", scale = 1): Promise<Drawing> {
+	if (!Number.isInteger(scale) || scale < 1) throw new RangeError(`Cannot draw at scale ${scale}`)
 	// A few kilobytes each, read here since the pak's file handle cannot go to the worker.
 	const files = new Map<number, StillFile>()
 	for (const layer of image.layers) {
@@ -27,7 +43,7 @@ export async function drawRecipe(image: Image, stills: StillTable, mode: ModeNam
 			if (!files.has(id)) files.set(id, { webp: stills.webp(id), width: stills.width(id), height: stills.height(id) })
 		}
 	}
-	const job: Job = { image, mode, frameMillis: dumpMeta.frameMillis ?? 50, stills: files }
+	const job: Job = { image, mode, scale, frameMillis: dumpMeta.frameMillis ?? 50, stills: files }
 
 	const worker = new Worker(new URL("./draw.worker.mts", import.meta.url), { type: "module" })
 	let drawn: Drawn

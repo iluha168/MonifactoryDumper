@@ -14,8 +14,8 @@ package com.iluha168.monifactory.faketime;
  * <p>
  * The layered renderer draws a layer once and has to tell from that one draw whether the layer could look different
  * at another time. For that the agent also reports what the frozen thread reads and draws to a {@link Recorder}:
- * every clock read, the frozen ones above and those it leaves running, and the buffers, text and items that go to
- * the GPU.
+ * every clock read, the frozen ones above and those it leaves running, and the buffers, text, items and fluids that
+ * go to the GPU.
  * <p>
  * A layer drawn once over a transparent clear needs its alpha channel to hold coverage, which the game's own blend
  * state does not give it. So the agent also keeps a copy of the blend state the game asks {@code GlStateManager} for,
@@ -118,8 +118,17 @@ public final class FakeTime {
          */
         void text(Object text, float x, float y, int color, Object matrix);
 
-        /** {@code ItemRenderer.render}: an ItemStack, its ItemDisplayContext and the PoseStack it is drawn with. */
-        void item(Object stack, Object context, Object poseStack);
+        /**
+         * {@code ItemRenderer.render}: an ItemStack, its ItemDisplayContext, the PoseStack it is drawn with, and the
+         * BakedModel it is drawn from, overrides already resolved.
+         */
+        void item(Object stack, Object context, Object poseStack, Object model);
+
+        /**
+         * {@code IClientFluidTypeExtensions.of(Fluid)}: a Fluid whose client look was asked for, which is how EMI and
+         * LDLib find a fluid's sprite and tint before they draw it.
+         */
+        void fluid(Object fluid);
     }
 
     private static volatile Recorder recorder;
@@ -265,9 +274,14 @@ public final class FakeTime {
         if (r != null) r.text(text, x, y, color, matrix);
     }
 
-    public static void onItem(Object stack, Object context, Object poseStack) {
+    public static void onItem(Object stack, Object context, Object poseStack, Object model) {
         Recorder r = listening();
-        if (r != null) r.item(stack, context, poseStack);
+        if (r != null) r.item(stack, context, poseStack, model);
+    }
+
+    public static void onFluid(Object fluid) {
+        Recorder r = listening();
+        if (r != null) r.fluid(fluid);
     }
 
     /** Checked on entry to {@code TextureManager.tick()}, which returns at once when this is false. */

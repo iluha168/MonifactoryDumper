@@ -722,7 +722,7 @@ fun Exec.requireArtifact(artifact: Provider<Directory>, images: Boolean = true) 
     val dir = artifact.map { it.asFile }
     val log = instanceDir.get().asFile.resolve("logs/latest.log")
     val files = listOfNotNull("recipes.json", "stills.pak".takeIf { images }, "stills.json".takeIf { images },
-        "meta.json")
+        "still_uses.json".takeIf { images }, "meta.json")
     doLast {
         val missing = files.filterNot { dir.get().resolve(it).isFile }
         if (missing.isNotEmpty()) {
@@ -1049,7 +1049,8 @@ abstract class ShardedGames : DefaultTask() {
         /** What each instance keeps for itself. */
         private val OWN = setOf("logs")
         /** The artifact files a game writes, meta.json last. */
-        private val FILES = listOf("recipes.json", "stills.pak", "stills.json", "render.tsv", "shard.tsv", "meta.json")
+        private val FILES = listOf("recipes.json", "stills.pak", "stills.json", "still_uses.json", "render.tsv", "shard.tsv",
+            "meta.json")
         /** ServerLeftovers.MARKER in the renderer, which logs it once the boot's memory peak is over. */
         const val RELEASED = "[dumper] released the server side"
         private val RELEASED_HEAP = Regex("""heap (\d+) MiB used after GC""")

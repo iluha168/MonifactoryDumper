@@ -21,3 +21,7 @@ export const matterNames = await Deno
 	.catch((cause) => {
 		throw new Error("Failed to parse dump matter names", { cause })
 	})
+
+export type MatterType = keyof typeof matterNames
+/** Every table of matter_names.json: the kinds of matter the dump knows. */
+export const matterTypes = Object.keys(matterNames) as MatterType[]

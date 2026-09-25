@@ -1,11 +1,15 @@
 import z from "zod"
-import { ApplicationCommandOptionTypes } from "discordeno"
+import { ApplicationCommandOptionTypes, DiscordEmbedField } from "discordeno"
 import { SubCommand } from "../../lib/leaf/SubCommand.mts"
 import { unique } from "../../../iterator/unique.mts"
-import { matterNames } from "../../../dump/matterNames.mts"
+import { matterNames, type MatterType, matterTypes } from "../../../dump/matterNames.mts"
 import { emojis } from "../config.mts"
-import { tags } from "../../../dump/tags.mts"
+import { registryOf, tags } from "../../../dump/tags.mts"
 import { Ingredient, recipes } from "../../../dump/recipes.mts"
+import { stills } from "../../../dump/stills.mts"
+import { widgets } from "../../../dump/stillUses.mts"
+import { drawWidget, pictureToAttachment } from "../../../picture/draw.mts"
+import { dominantColor } from "../../../picture/codec.mts"
 
 export const commandMatterInfo = new SubCommand(
 	{
@@ -16,7 +20,7 @@ export const commandMatterInfo = new SubCommand(
 			name: "type",
 			description: "Which matter type?",
 			required: true,
-			choices: Object.keys(matterNames).map((name) => ({ name, value: name })),
+			choices: matterTypes.map((name) => ({ name, value: name })),
 		}, {
 			type: ApplicationCommandOptionTypes.String,
 			name: "id",
@@ -30,7 +34,7 @@ export const commandMatterInfo = new SubCommand(
 		}],
 	},
 	{
-		type: z.literal(Object.keys(matterNames) as (keyof typeof matterNames)[]),
+		type: z.literal(matterTypes),
 		id: z.string().optional(),
 		name: z.string().optional(),
 	},
@@ -39,7 +43,13 @@ export const commandMatterInfo = new SubCommand(
 			const translations = matterNames[type]
 
 			const respondFound = async (id: string, name: string) => {
-				const uses = countUses(type, id)
+				const tagsContaining = new Set(
+					tags[type]
+						.entries()
+						.filter(([, entries]) => entries.includes(id))
+						.map(([tag]) => tag),
+				)
+				const uses = countUses(type, id, tagsContaining)
 				const usesTotal = uses.input + uses.output + uses.catalyst
 				if (!usesTotal) {
 					return interaction.respond({
@@ -49,11 +59,47 @@ export const commandMatterInfo = new SubCommand(
 						}],
 					})
 				}
-				await interaction.respond({
+
+				const fields: DiscordEmbedField[] = [{
+					name: "ID",
+					value: `\`${id}\``,
+					inline: true,
+				}, {
+					name: "Matter",
+					value: type,
+					inline: true,
+				}, {
+					name: "Uses",
+					value: `${uses.input} as an input, ${uses.output} as an output, ${uses.catalyst} as a catalyst.`,
+					inline: true,
+				}, {
+					name: "Tags",
+					value: `${tagsContaining.size} uses` + (
+						tagsContaining.size > 0
+							? `: ${tagsContaining.values().take(10).map((tag) => `\`#${tag}\``).toArray().join(", ")}${tagsContaining.size > 10 ? ` and ${tagsContaining.size - 10} more!` : "."}`
+							: "."
+					),
+					inline: true,
+				}]
+
+				const widget = widgets?.widget(type, id)
+				if (widget && stills) {
+					await interaction.defer()
+					const picture = await drawWidget(widget, stills, 4)
+					return interaction.edit({
+						files: [pictureToAttachment(picture)],
+						embeds: [{
+							title: name,
+							color: await dominantColor(picture.bytes),
+							image: { url: `attachment://${picture.name}` },
+							fields,
+						}],
+					})
+				}
+				return interaction.respond({
 					embeds: [{
-						title: `${name} (\`${id}\`)`,
-						description: `This ${type} has ${usesTotal} uses in recipes (${uses.input} as an input, ${uses.output} as an output, ${uses.catalyst} as a catalyst).`,
-						footer: { text: "Image coming soon!" },
+						title: name,
+						fields,
 					}],
 				})
 			}
@@ -76,14 +122,15 @@ export const commandMatterInfo = new SubCommand(
 				return interaction.respond(`${emojis.errorUser} No ${type} has this name!`, { isPrivate: true })
 			}
 			return interaction.respond(
-				`Found ${idsByName.length} ${type}s by the name \`${name}\`:\n${idsByName.slice(0, 10).map(([id]) => "`" + id + "`").join(", ")}${
-					idsByName.length > 10 ? `... and ${idsByName.length - 10} more!` : ""
+				`${emojis.errorUser} Found ${idsByName.length} ${type}s by the name \`${name}\`:\n${idsByName.slice(0, 10).map(([id]) => "`" + id + "`").join(", ")}${
+					idsByName.length > 10 ? ` and ${idsByName.length - 10} more!` : "."
 				}`,
+				{ isPrivate: true },
 			)
 		},
 		autocomplete({ type, id, name }, focus) {
 			if (focus === "type") {
-				return Object.keys(matterNames).map((k) => ({ name: k, value: k }))
+				return matterTypes.map((k) => ({ name: k, value: k }))
 			}
 			if (type === undefined) {
 				return [] // Yeah no, not searching all categories.
@@ -109,20 +156,14 @@ export const commandMatterInfo = new SubCommand(
 	},
 )
 
-function countUses(type: keyof typeof matterNames, id: string) {
-	const reg = `minecraft:${type}`
-	const holdingTags = new Set(
-		tags[type]
-			.entries()
-			.filter(([, entries]) => entries.includes(id))
-			.map(([tag]) => tag),
-	)
+function countUses(type: MatterType, id: string, tagsContaining: ReadonlySet<string>) {
+	const reg = registryOf(type)
 	const matches = (ingredient: Ingredient) => {
 		switch (ingredient?.k) {
 			case "s":
 				return ingredient.t === type && ingredient.id === id
 			case "t":
-				return ingredient.reg === reg && holdingTags.has(ingredient.tag)
+				return ingredient.reg === reg && tagsContaining.has(ingredient.tag)
 			case "m":
 				return ingredient.ids.includes(id)
 			default:

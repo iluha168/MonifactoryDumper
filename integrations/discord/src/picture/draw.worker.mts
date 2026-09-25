@@ -29,6 +29,8 @@ export interface StillFile {
 export interface Job {
 	readonly image: Image
 	readonly mode: ModeName
+	/** Output pixels per pixel of the image, a whole number: each is drawn as a square of them. */
+	readonly scale: number
 	readonly frameMillis: number
 	/** Every still the image's layers show, by id. */
 	readonly stills: ReadonlyMap<number, StillFile>
@@ -67,16 +69,19 @@ scope.onmessage = async ({ data }: MessageEvent<Job>) => {
  * keeps the canvas alpha, as dumper/FORMAT.md has it. Read back unpremultiplied, that gives FORMAT.md's pixels exactly:
  * its Python reference drew 560 pictures of 0.13.8, and all 560 match.
  */
-function draw(ck: CanvasKit, { image, mode, frameMillis, stills }: Job): Drawn {
+function draw(ck: CanvasKit, { image, mode, scale: upscale, frameMillis, stills }: Job): Drawn {
 	const plan = modes[mode](image)
 	const whole = timeline(image.layers, plan.end, plan.steps)
-	const count = Math.max(1, Math.min(whole.ticks.length, Math.floor(MAX_PIXELS / (image.w * image.h))))
+	const [w, h] = [image.w * upscale, image.h * upscale]
+	const count = Math.max(1, Math.min(whole.ticks.length, Math.floor(MAX_PIXELS / (w * h))))
 	const [ticks, durations] = [whole.ticks.slice(0, count), whole.durations.slice(0, count)]
 	const end = ticks.at(-1)! + durations.at(-1)!
 
-	const surface = ck.MakeSurface(image.w, image.h)
-	if (!surface) throw new Error(`Skia has no ${image.w}x${image.h} surface`)
+	const surface = ck.MakeSurface(w, h)
+	if (!surface) throw new Error(`Skia has no ${w}x${h} surface`)
 	const canvas = surface.getCanvas()
+	// Every layer's save and restore keeps this. Nearest filtering below makes each pixel a sharp square.
+	canvas.scale(upscale, upscale)
 	const paint = new ck.Paint()
 	// One layer's still is often another's too, in this frame or the next: decode each once. Skia decodes them exactly as
 	// dwebp does: all 371,972 stills of 0.13.8 checked, 1,221 of them semi-transparent.
@@ -87,7 +92,7 @@ function draw(ck: CanvasKit, { image, mode, frameMillis, stills }: Job): Drawn {
 		return picture
 	}
 
-	const size = image.w * image.h * 4
+	const size = w * h * 4
 	const data = new Uint8Array(size * ticks.length)
 	for (const [i, tick] of ticks.entries()) {
 		canvas.clear(ck.TRANSPARENT)
@@ -108,8 +113,8 @@ function draw(ck: CanvasKit, { image, mode, frameMillis, stills }: Job): Drawn {
 			canvas.restore()
 		}
 		const pixels = canvas.readPixels(0, 0, {
-			width: image.w,
-			height: image.h,
+			width: w,
+			height: h,
 			colorType: ck.ColorType.RGBA_8888,
 			alphaType: ck.AlphaType.Unpremul,
 			colorSpace: ck.ColorSpace.SRGB,
@@ -117,7 +122,7 @@ function draw(ck: CanvasKit, { image, mode, frameMillis, stills }: Job): Drawn {
 		data.set(pixels as Uint8Array, i * size)
 	}
 	return {
-		frames: { width: image.w, height: image.h, data, millis: durations.map((d) => d * frameMillis) },
+		frames: { width: w, height: h, data, millis: durations.map((d) => d * frameMillis) },
 		loops: plan.loops,
 		seamless: plan.uncut === undefined && end === plan.end,
 		seconds: end * frameMillis / 1000,

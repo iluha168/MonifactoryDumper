@@ -6,12 +6,22 @@ import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.font.FontTexture;
+import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.texture.TextureManager;
+import net.minecraft.client.resources.model.BakedModel;
+import net.minecraft.client.resources.model.ModelManager;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.FormattedCharSequence;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.material.Fluid;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
+import net.minecraftforge.registries.ForgeRegistries;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -22,6 +32,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,6 +50,10 @@ import java.util.TreeSet;
  * </ul>
  * Anything else a draw puts on screen is a function of state it does not change. {@code System.nanoTime} and
  * {@code Util.getNanos} are counted but don't count: code reads them to time itself, not to animate.
+ * <p>
+ * It also notes what the draw used, for {@code still_uses.json} ({@link Uses}): the registered textures bound to the
+ * samplers of the shader each indexed draw ran, every atlas sprite under an uploaded primitive, the items drawn with
+ * their models, the fluids whose look was asked for, and the text.
  * <p>
  * Reading a clock is not the same as depending on it. ImmediatelyFast stamps a pooled buffer on every text draw, CIT
  * Resewn stamps its cache on every item. So {@link Verdict#CLOCK} only says the draw read one; the caller draws the
@@ -66,6 +81,14 @@ final class LayerRecorder implements FakeTime.Recorder {
         private int uploads, draws, unrecordedDraws;
         private boolean unrecordedAnimatedAtlas;
         private final Set<String> animatedSprites = new TreeSet<>();
+        // What the draw used, in the order it first did. Textures, sprites and fluids have no equals of their own,
+        // so these sets hold each object once.
+        private final Set<AbstractTexture> textures = new LinkedHashSet<>();
+        private final Set<TextureAtlasSprite> sprites = new LinkedHashSet<>();
+        private final Set<Fluid> fluids = new LinkedHashSet<>();
+        private final Set<String> models = new LinkedHashSet<>(), items = new LinkedHashSet<>(),
+                texts = new LinkedHashSet<>();
+        private Uses uses;
 
         /** How many times the draw read the {@code FakeTime.TIME_} clock {@code source}. */
         int reads(int source) {
@@ -90,6 +113,11 @@ final class LayerRecorder implements FakeTime.Recorder {
         /** The animated sprites the draw sampled, by name. */
         Set<String> animatedSprites() {
             return Collections.unmodifiableSet(animatedSprites);
+        }
+
+        /** What the draw used. */
+        Uses uses() {
+            return uses;
         }
 
         Verdict verdict() {
@@ -135,6 +163,15 @@ final class LayerRecorder implements FakeTime.Recorder {
     private static final Field TEXTURE_ID = ObfuscationReflectionHelper.findField(AbstractTexture.class, "f_117950_");
     private static final Field SPRITES_BY_NAME =
             ObfuscationReflectionHelper.findField(TextureAtlas.class, "f_118264_");
+    /**
+     * {@code ShaderInstance.samplerNames} and {@code samplerMap}: the samplers a shader binds when it is applied, and
+     * what it binds to each, a GL id, a texture or a render target.
+     */
+    private static final Field SAMPLER_NAMES =
+            ObfuscationReflectionHelper.findField(ShaderInstance.class, "f_173329_");
+    private static final Field SAMPLERS = ObfuscationReflectionHelper.findField(ShaderInstance.class, "f_173328_");
+    /** {@code ModelManager.bakedRegistry}: every top-level baked model by its location. */
+    private static final Field BAKED_MODELS = ObfuscationReflectionHelper.findField(ModelManager.class, "f_119397_");
 
     private final Minecraft minecraft;
     private Trace trace;
@@ -162,7 +199,22 @@ final class LayerRecorder implements FakeTime.Recorder {
         FakeTime.record(null);
         Trace out = trace;
         trace = null;
+        if (out != null) out.uses = uses(out);
         return out;
+    }
+
+    /** What {@code trace} used, by name. Outside the draw, so it may look up whatever it likes. */
+    private Uses uses(Trace trace) {
+        List<String> textures = new ArrayList<>(trace.textures.size());
+        for (AbstractTexture texture : trace.textures) {
+            ResourceLocation name = name(texture);
+            if (name != null) textures.add(name.toString());
+        }
+        List<String> sprites = new ArrayList<>(trace.sprites.size());
+        for (TextureAtlasSprite sprite : trace.sprites) sprites.add(sprite.contents().name().toString());
+        List<String> fluids = new ArrayList<>(trace.fluids.size());
+        for (Fluid fluid : trace.fluids) fluids.add(String.valueOf(ForgeRegistries.FLUIDS.getKey(fluid)));
+        return Uses.of(textures, sprites, trace.models, trace.items, fluids, trace.texts);
     }
 
     // Hooks. The agent calls them on the frozen thread, in the middle of the draw.
@@ -183,7 +235,6 @@ final class LayerRecorder implements FakeTime.Recorder {
         BufferBuilder.DrawState state = buffer.drawState();
         if (state.indexOnly() || !(texture(RenderSystem.getShaderTexture(0)) instanceof TextureAtlas atlas)) return;
         AtlasIndex index = index(atlas);
-        if (index.animated.isEmpty()) return;
         VertexFormat format = state.format();
         int uv = uvOffset(format);
         if (uv < 0) return;
@@ -197,6 +248,7 @@ final class LayerRecorder implements FakeTime.Recorder {
         int base = data.position();
         // One sprite per primitive, the one under its UV centroid: a corner's UV sits on the sprite's edge, where
         // the neighbour starts.
+        TextureAtlasSprite last = null;
         for (int vertex = 0; vertex + corners <= state.vertexCount(); vertex += corners) {
             float u = 0, v = 0;
             for (int k = 0; k < corners; k++) {
@@ -205,9 +257,10 @@ final class LayerRecorder implements FakeTime.Recorder {
                 v += data.getFloat(at + 4);
             }
             TextureAtlasSprite sprite = index.at(u / corners, v / corners);
-            if (sprite != null && index.animated.contains(sprite)) {
-                trace.animatedSprites.add(sprite.contents().name().toString());
-            }
+            if (sprite == null || sprite == last) continue;
+            last = sprite;
+            trace.sprites.add(sprite);
+            if (index.animated.contains(sprite)) trace.animatedSprites.add(sprite.contents().name().toString());
         }
     }
 
@@ -215,6 +268,7 @@ final class LayerRecorder implements FakeTime.Recorder {
     public void drawElements() {
         if (trace == null) return;
         trace.draws++;
+        sampled();
         if (pending > 0) {
             pending--;
             return;
@@ -231,19 +285,101 @@ final class LayerRecorder implements FakeTime.Recorder {
         }
     }
 
-    /** Does nothing yet: a recorder of what texts a layer draws, for the metadata, is future work. */
-    @Override
-    public void text(Object text, float x, float y, int color, Object matrix) {
+    /**
+     * Notes the textures the draw about to go out samples: those the current shader binds to its samplers, as it
+     * applied them right before the draw. Glyph pages are left out; {@link #text} has what they spell. A texture the
+     * texture manager does not hold, such as a render target or the overlay texture, has no name to note.
+     */
+    @SuppressWarnings("unchecked")
+    private void sampled() {
+        ShaderInstance shader = RenderSystem.getShader();
+        if (shader == null) return;
+        Map<String, Object> bound = (Map<String, Object>) get(SAMPLERS, shader);
+        for (String sampler : (List<String>) get(SAMPLER_NAMES, shader)) {
+            Object value = bound.get(sampler);
+            AbstractTexture texture = value instanceof AbstractTexture t ? t
+                    : value instanceof Integer id ? texture(id) : null;
+            if (texture != null && !(texture instanceof FontTexture)) trace.textures.add(texture);
+        }
     }
 
-    /** Does nothing yet: a recorder of what items a layer draws, for the metadata, is future work. */
+    /**
+     * Notes the text as plain text. A drawInBatch overload that calls another reports one text twice, and a text drawn
+     * again is noted once anyway.
+     */
     @Override
-    public void item(Object stack, Object context, Object poseStack) {
+    public void text(Object text, float x, float y, int color, Object matrix) {
+        if (trace == null) return;
+        String plain;
+        if (text instanceof String s) {
+            plain = s;
+        } else if (text instanceof Component component) {
+            plain = component.getString();
+        } else if (text instanceof FormattedCharSequence sequence) {
+            StringBuilder out = new StringBuilder();
+            sequence.accept((index, style, codePoint) -> {
+                out.appendCodePoint(codePoint);
+                return true;
+            });
+            plain = out.toString();
+        } else {
+            return;
+        }
+        if (!plain.isBlank()) trace.texts.add(plain);
+    }
+
+    /** Notes the item, with its NBT if it has any, and the model it is drawn from if the model manager holds it. */
+    @Override
+    public void item(Object stack, Object context, Object poseStack, Object model) {
+        if (trace == null || !(stack instanceof ItemStack item) || item.isEmpty()) return;
+        String id = String.valueOf(ForgeRegistries.ITEMS.getKey(item.getItem()));
+        CompoundTag tag = item.getTag();
+        trace.items.add(tag == null || tag.isEmpty() ? id : id + tag);
+        String name = model instanceof BakedModel baked ? modelName(baked) : null;
+        if (name != null) trace.models.add(name);
+    }
+
+    @Override
+    public void fluid(Object fluid) {
+        if (trace != null && fluid instanceof Fluid f) trace.fluids.add(f);
+    }
+
+    // Models by identity.
+
+    /** The map {@link #modelNames} was built from: a resource reload bakes a new one. */
+    private Map<?, ?> modelSource;
+    private final Map<BakedModel, String> modelNames = new IdentityHashMap<>();
+
+    /**
+     * Where the model manager keeps {@code model}, or null: a model an item's overrides picked, or one a mod baked on
+     * its own, is kept nowhere. Where several locations hold one model, an item's inventory model wins, then the
+     * first in text order.
+     */
+    private String modelName(BakedModel model) {
+        Map<?, ?> registry = (Map<?, ?>) get(BAKED_MODELS, minecraft.getModelManager());
+        if (registry != modelSource) {
+            modelNames.clear();
+            for (Map.Entry<?, ?> entry : registry.entrySet()) {
+                if (!(entry.getValue() instanceof BakedModel baked)) continue;
+                String name = entry.getKey().toString();
+                modelNames.merge(baked, name, (a, b) -> better(b, a) ? b : a);
+            }
+            modelSource = registry;
+        }
+        return modelNames.get(model);
+    }
+
+    private static boolean better(String candidate, String than) {
+        boolean inventory = candidate.endsWith("#inventory");
+        if (inventory != than.endsWith("#inventory")) return inventory;
+        return candidate.compareTo(than) < 0;
     }
 
     // Textures by GL id.
 
     private final Map<Integer, AbstractTexture> byId = new HashMap<>();
+    /** Every registered texture's location, as of the last rebuild of {@link #byId}. */
+    private final Map<AbstractTexture, ResourceLocation> names = new IdentityHashMap<>();
     /** Ids looked up and not found since the texture manager's map last changed size. */
     private final Set<Integer> unknown = new HashSet<>();
     private int indexedSize = -1;
@@ -257,24 +393,45 @@ final class LayerRecorder implements FakeTime.Recorder {
      * again until the manager's map changes size. A remembered hit is checked against the texture's id, which moves
      * when a texture is released and its id handed to another.
      */
-    @SuppressWarnings("unchecked")
     private AbstractTexture texture(int id) {
         if (id <= 0) return null;
-        Map<ResourceLocation, AbstractTexture> all = (Map<ResourceLocation, AbstractTexture>)
-                get(TEXTURES_BY_PATH, minecraft.getTextureManager());
+        Map<ResourceLocation, AbstractTexture> all = registered();
         AbstractTexture found = byId.get(id);
         if (found != null && idOf(found) == id) return found;
         if (all.size() != indexedSize) unknown.clear();
         else if (found == null && unknown.contains(id)) return null;
+        reindex(all);
+        found = byId.get(id);
+        if (found == null) unknown.add(id);
+        return found;
+    }
+
+    /** Where the texture manager holds {@code texture}, or null if it holds it nowhere. */
+    private ResourceLocation name(AbstractTexture texture) {
+        ResourceLocation name = names.get(texture);
+        if (name != null) return name;
+        Map<ResourceLocation, AbstractTexture> all = registered();
+        if (all.size() == indexedSize) return null;
+        unknown.clear();
+        reindex(all);
+        return names.get(texture);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<ResourceLocation, AbstractTexture> registered() {
+        return (Map<ResourceLocation, AbstractTexture>) get(TEXTURES_BY_PATH, minecraft.getTextureManager());
+    }
+
+    private void reindex(Map<ResourceLocation, AbstractTexture> all) {
         byId.clear();
-        for (AbstractTexture texture : all.values()) {
+        names.clear();
+        for (Map.Entry<ResourceLocation, AbstractTexture> entry : all.entrySet()) {
+            AbstractTexture texture = entry.getValue();
+            names.putIfAbsent(texture, entry.getKey());
             int own = idOf(texture);
             if (own > 0) byId.put(own, texture);
         }
         indexedSize = all.size();
-        found = byId.get(id);
-        if (found == null) unknown.add(id);
-        return found;
     }
 
     private static int idOf(AbstractTexture texture) {

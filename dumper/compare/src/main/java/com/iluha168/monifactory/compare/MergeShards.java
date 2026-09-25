@@ -1,6 +1,8 @@
 package com.iluha168.monifactory.compare;
 
+import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
@@ -26,6 +28,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -56,7 +59,8 @@ import java.util.stream.Stream;
  * one game. Two shards that drew the same still each stored it, and the merge keeps one: stills are the same when their
  * WebP bytes are. The encoder is deterministic (CompareDumps relies on this too), so equal pixels give equal bytes, and
  * lossless WebP decodes different pixels from different bytes, so equal bytes are never two pictures. The payloads are
- * copied, not re-encoded.
+ * copied, not re-encoded. A still's row of {@code still_uses.json} goes with it, and a still several shards drew gets
+ * every entry of each shard's row, shard 0's first.
  * <p>
  * {@code categories.tsv} and {@code corpus} in {@code meta.json} are shard 0's: they count its boot's corpus, which
  * differs from the others' by the drift. {@code lang.json}, {@code matter_names.json} and {@code tags.json} are
@@ -71,6 +75,10 @@ public final class MergeShards {
     /** meta.json fields every shard must agree on, since the merged artifact states each of them once. */
     private static final List<String> SAME = List.of("format", "pack", "minecraft", "forge", "renderer", "images",
             "every", "sample", "limit", "scale", "frameMillis", "framePolicy");
+    /** The lists of a {@code still_uses.json} row, in the order the renderer writes them. */
+    private static final List<String> USES_KEYS = List.of("textures", "sprites", "models", "items", "fluids", "texts");
+    /** Writes rows as the renderer does: compact, and {@code <} or {@code =} in a text left as they are. */
+    private static final Gson COMPACT = new GsonBuilder().disableHtmlEscaping().create();
 
     /** What a merge did, as the summary prints it. */
     record Result(int records, int stills, long stillsBytes, int sharedStills, int drift, int inserted, int lost,
@@ -108,6 +116,8 @@ public final class MergeShards {
         final List<String> lines = new ArrayList<>();
         final List<String> render = new ArrayList<>();
         String renderHeader;
+        /** Per old still id, its row of still_uses.json. */
+        List<String> uses;
         /** Per old still id, the merged one, or -1 until a record uses it. */
         int[] ids;
 
@@ -167,6 +177,15 @@ public final class MergeShards {
             if (render.size() != lines.size()) {
                 throw new IOException(directory + ": render.tsv has " + render.size() + " rows, recipes.json "
                         + lines.size() + " records");
+            }
+            uses = new ArrayList<>(ids.length);
+            for (String line : Files.readAllLines(directory.resolve(StillTable.USES), StandardCharsets.UTF_8)) {
+                if (line.equals("[") || line.equals("]") || line.isEmpty()) continue;
+                uses.add(line.endsWith(",") ? line.substring(0, line.length() - 1) : line);
+            }
+            if (uses.size() != ids.length) {
+                throw new IOException(directory + ": " + StillTable.USES + " has " + uses.size() + " rows, "
+                        + StillTable.JSON + " " + ids.length + " stills");
             }
         }
 
@@ -281,6 +300,7 @@ public final class MergeShards {
         // Records, with their stills renumbered by first reference and copied into the merged pak.
         Map<String, Integer> byContent = new HashMap<>();
         List<StillEntry> table = new ArrayList<>();
+        List<String> uses = new ArrayList<>();
         int shared = 0;
         List<String> renderRows = new ArrayList<>(order.size());
         MessageDigest sha = sha256();
@@ -309,13 +329,16 @@ public final class MergeShards {
                                 byte[] payload = shard.artifact.pak.read(entry.payload());
                                 String content = HexFormat.of().formatHex(sha.digest(payload));
                                 Integer known = byContent.get(content);
+                                String row = shard.uses.get(old);
                                 if (known == null) {
                                     known = table.size();
                                     byContent.put(content, known);
                                     PakEntry written = pak.append(payload);
                                     table.add(new StillEntry(written, entry.width(), entry.height()));
+                                    uses.add(row);
                                 } else {
                                     shared++;
+                                    uses.set(known, unionUses(uses.get(known), row));
                                 }
                                 shard.ids[old] = known;
                             }
@@ -344,6 +367,7 @@ public final class MergeShards {
         }
         StillTable stills = new StillTable(table);
         stills.write(out.resolve(StillTable.JSON));
+        StillTable.writeUses(out.resolve(StillTable.USES), uses);
 
         try (BufferedWriter render = Files.newBufferedWriter(out.resolve("render.tsv"), StandardCharsets.UTF_8)) {
             render.write(shards.get(0).renderHeader + "\n");
@@ -417,6 +441,28 @@ public final class MergeShards {
         Files.writeString(out.resolve("meta.json"),
                 new GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(meta) + "\n",
                 StandardCharsets.UTF_8);
+    }
+
+    /** Two rows of {@code still_uses.json} for one still, as one: every entry of each list, {@code a}'s first. */
+    static String unionUses(String a, String b) {
+        if (a.equals(b)) return a;
+        JsonObject first = JsonParser.parseString(a).getAsJsonObject();
+        JsonObject second = JsonParser.parseString(b).getAsJsonObject();
+        List<String> keys = new ArrayList<>(USES_KEYS);
+        for (String key : first.keySet()) if (!keys.contains(key)) keys.add(key);
+        for (String key : second.keySet()) if (!keys.contains(key)) keys.add(key);
+        JsonObject out = new JsonObject();
+        for (String key : keys) {
+            LinkedHashSet<JsonElement> entries = new LinkedHashSet<>();
+            for (JsonObject row : List.of(first, second)) {
+                if (row.has(key)) row.getAsJsonArray(key).forEach(entries::add);
+            }
+            if (entries.isEmpty()) continue;
+            JsonArray array = new JsonArray();
+            entries.forEach(array::add);
+            out.add(key, array);
+        }
+        return COMPACT.toJson(out);
     }
 
     private static MessageDigest sha256() {

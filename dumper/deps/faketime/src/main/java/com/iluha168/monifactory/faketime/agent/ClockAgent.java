@@ -42,7 +42,8 @@ import java.util.stream.Collectors;
  * <li>every {@code System.nanoTime()} call site, like currentTimeMillis, but still returning the real time;</li>
  * <li>a call on entry to the clocks left running ({@code Util.getNanos()}, {@code Blaze3D.getTime()},
  * {@code RenderSystem.getShaderGameTime()}) and to what draws: {@code BufferUploader.upload},
- * {@code GlStateManager._drawElements}, {@code Font.drawInBatch} and {@code ItemRenderer.render}.</li>
+ * {@code GlStateManager._drawElements}, {@code Font.drawInBatch}, {@code ItemRenderer.render} and Forge's
+ * {@code IClientFluidTypeExtensions.of(Fluid)}.</li>
  * </ul>
  * And a layer drawn once has to have its alpha channel set up by the renderer right before each of its draws (see
  * {@link FakeTime#capture}), from the blend state the game asked for. So a call on entry to each
@@ -53,7 +54,7 @@ import java.util.stream.Collectors;
  * FakeTime, so it goes only into classes whose module can read FakeTime's. Forge runs several module layers, and
  * an explicit module such as log4j's API reads only what it requires; a patched call there cannot link, and patching
  * log4j's {@code ReusableMessageFactory} that way kills the JVM before Forge starts. {@link Module#canRead} is the
- * test, and it needs no upkeep when the pack changes. The Minecraft methods above are the only ones named.
+ * test, and it needs no upkeep when the pack changes. The Minecraft and Forge methods above are the only ones named.
  * <p>
  * Classes that are not named here and never mention currentTimeMillis or nanoTime are passed through after a raw
  * byte scan, without ASM ever parsing them.
@@ -113,6 +114,8 @@ public final class ClockAgent implements ClassFileTransformer {
     /** What every drawInBatch overload takes after the text. The one with a bidi flag takes it after these. */
     private static final String DRAW_IN_BATCH = "FFIZLorg/joml/Matrix4f;"
             + "Lnet/minecraft/client/renderer/MultiBufferSource;Lnet/minecraft/client/gui/Font$DisplayMode;II";
+    private static final String FLUID_EXTENSIONS =
+            "net/minecraftforge/client/extensions/common/IClientFluidTypeExtensions";
     private static final String ON_TEXT = "(Ljava/lang/Object;FFILjava/lang/Object;)V";
     /** text, x, y, color and matrix; slot 5 is the drop shadow flag. */
     private static final int[] TEXT_ARGS = {Opcodes.ALOAD, 1, Opcodes.FLOAD, 2, Opcodes.FLOAD, 3, Opcodes.ILOAD, 4,
@@ -168,8 +171,12 @@ public final class ClockAgent implements ClassFileTransformer {
                     "(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemDisplayContext;Z"
                             + "Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II"
                             + "Lnet/minecraft/client/resources/model/BakedModel;)V",
-                    "onItem", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",
-                    Opcodes.ALOAD, 1, Opcodes.ALOAD, 2, Opcodes.ALOAD, 4));
+                    "onItem", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",
+                    Opcodes.ALOAD, 1, Opcodes.ALOAD, 2, Opcodes.ALOAD, 4, Opcodes.ALOAD, 8),
+            // Forge's, not a mod's, and Forge's names are not obfuscated. The descriptor picks the Fluid overload.
+            atEntry("IClientFluidTypeExtensions.of(Fluid)", FLUID_EXTENSIONS, Set.of("of"),
+                    "(Lnet/minecraft/world/level/material/Fluid;)L" + FLUID_EXTENSIONS + ";", "onFluid",
+                    "(Ljava/lang/Object;)V", Opcodes.ALOAD, 0));
     private static final Map<String, List<Hook>> HOOKS_BY_OWNER =
             HOOKS.stream().collect(Collectors.groupingBy(Hook::owner));
 

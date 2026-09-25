@@ -115,6 +115,8 @@ final class Batch {
     private final String[] reasons;
     private final int[] layerCounts, animatedLayers, framesDrawn;
     private final long[] recipeNanos;
+    /** Per still id, what drew it: for {@code still_uses.json}. */
+    private final List<Uses> stillUses = new ArrayList<>();
     private final FallbackTally fallbacks = new FallbackTally();
     private int layered, fallback, failed;
     private long layers, animated, clockLayers, clockStatic, frames;
@@ -472,7 +474,13 @@ final class Batch {
         List<Layer> out = new ArrayList<>(stored.size());
         for (RecipeJob.Stored layer : stored) {
             int[] ids = new int[layer.hashes().size()];
-            for (int k = 0; k < ids.length; k++) ids[k] = stills.add(layer.hashes().get(k), layer.pictures().get(k));
+            for (int k = 0; k < ids.length; k++) {
+                ids[k] = stills.add(layer.hashes().get(k), layer.pictures().get(k));
+                Uses uses = layer.uses().get(k);
+                // Ids go out one after another from 0, in the order add sees stills: a new one is the next row.
+                if (ids[k] == stillUses.size()) stillUses.add(uses);
+                else stillUses.set(ids[k], stillUses.get(ids[k]).merge(uses));
+            }
             LayerPlan.Box box = layer.box();
             out.add(new Layer(box.x(), box.y(), box.width(), box.height(), Timeline.of(ids)));
         }
@@ -543,6 +551,10 @@ final class Batch {
         }
 
         writeRenderTsv(output.resolve("render.tsv"));
+        if (stillUses.size() != table.size()) {
+            throw new IllegalStateException(stillUses.size() + " stills' uses for " + table.size() + " stills");
+        }
+        StillTable.writeUses(output.resolve(StillTable.USES), stillUses.stream().map(Uses::toJson).toList());
         RecipeJson.writeFile(entries, images, output.resolve("recipes.json"));
         if (selection.shard() != null) selection.shard().write(output.resolve(SHARD_FILE));
         // Last: a directory with meta.json in it is finished.

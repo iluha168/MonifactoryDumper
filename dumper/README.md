@@ -21,6 +21,8 @@ dumper/build/dumps/<pack name>-<pack version>/     e.g. Monifactory-0.13.8
   recipes.json     every recipe, one JSON record per line, each with its picture as layers of still ids ("image")
   stills.pak       every distinct still, lossless WebP, back to back, in still-id order
   stills.json      where each still is in stills.pak, and its size
+  still_uses.json  per still, what drew it: textures, atlas sprites, item models, items, fluids and text, so a
+                   picture can be found by the id of what it shows
   meta.json        artifact format (2), pack name, version and mode, Minecraft and Forge, the renderer jar's
                    SHA-256, scale, frame policy, still and recipe counts, and whether this is the whole corpus or a
                    sample
@@ -178,7 +180,8 @@ place, with `latest` moved and `verifyDump` run the same way. say 1 and the buil
   recipe its boot picked, in its order. `MergeShards` (in `:dumper:compare`) makes one artifact of them. Records follow
   game 0's list; a recipe only another game's boot had goes right after the recipe before it in that game's list.
   Still ids are handed out again in record order, and a still two games both drew is stored once: equal pictures encode
-  to equal WebP bytes, so the merge keeps one copy of equal bytes and copies payloads without re-encoding them.
+  to equal WebP bytes, so the merge keeps one copy of equal bytes and copies payloads without re-encoding them. A
+  still's row of `still_uses.json` goes along with it, and a still two games drew gets both games' entries.
   `categories.tsv` and `corpus` are game 0's. So are `lang.json`, `matter_names.json` and `tags.json`, which should be
   the same in every game; the merge warns of one that is not. meta.json says `"processes": N` and `"drift"`, how many
   recipes some game's boot listed and another's did not, and the merge prints the same with how many of those were

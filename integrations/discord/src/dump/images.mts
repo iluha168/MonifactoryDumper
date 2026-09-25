@@ -42,6 +42,8 @@ export class ImageTable {
 	private blocks = new Uint8Array()
 	/** Where each block's stream ends in {@link blocks}. */
 	private blockEnds = new Uint32Array()
+	/** The block {@link read} inflated last, so that reading images in order inflates each block once. */
+	private inflated: { block: number; bytes: Promise<Uint8Array> } | null = null
 
 	/** Packs `image` and returns its handle. Only valid until {@link seal}. */
 	add(image: Image): RecipeImage {
@@ -89,7 +91,11 @@ export class ImageTable {
 	async read(index: number): Promise<Image> {
 		if (!(this.starts instanceof Uint32Array)) throw new Error("The table is not sealed yet")
 		const block = Math.floor(index / IMAGES_PER_BLOCK)
-		const bytes = await through(this.blocks.subarray(block ? this.blockEnds[block - 1] : 0, this.blockEnds[block]), new DecompressionStream("deflate-raw"))
+		if (this.inflated?.block !== block) {
+			const stream = this.blocks.subarray(block ? this.blockEnds[block - 1] : 0, this.blockEnds[block])
+			this.inflated = { block, bytes: through(stream, new DecompressionStream("deflate-raw")) }
+		}
+		const bytes = await this.inflated.bytes
 		let at = this.starts[index] - this.starts[block * IMAGES_PER_BLOCK]
 		const varint = () => {
 			let value = 0

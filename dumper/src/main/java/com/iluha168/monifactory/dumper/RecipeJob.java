@@ -49,6 +49,10 @@ import static com.iluha168.monifactory.dumper.Dumper.LOG;
  * same way if it only read a clock), and sequenced with one {@link FramePolicy} over whole frames if it animates. Only
  * a failure there fails the recipe.
  * <p>
+ * <b>Uses.</b> The recorder watches every draw whose picture can be stored: frame 0's layers, the sequence's, and every
+ * frame of the recipe drawn whole. Each picture gets what its draw used ({@link Uses}), and a picture two draws made
+ * gets what both used.
+ * <p>
  * Nothing leaves the job until it is done: the batch reads {@link #layers()} then, so a recipe that fell back adds no
  * layered stills to the artifact. Render thread only.
  */
@@ -96,9 +100,9 @@ final class RecipeJob {
 
     /**
      * A layer as it goes into the artifact: its box on the canvas and its loop, one still per frame from frame 0.
-     * Equal stills are equal hashes; the pictures are the stills' pixels.
+     * Equal stills are equal hashes; the pictures are the stills' pixels, and the uses what drew each.
      */
-    record Stored(LayerPlan.Box box, List<StillHash> hashes, List<Frame> pictures) {
+    record Stored(LayerPlan.Box box, List<StillHash> hashes, List<Frame> pictures, List<Uses> uses) {
     }
 
     private enum Phase { FRAME0, SEQUENCE, WHOLE0, WHOLE_SEQUENCE, DONE }
@@ -126,10 +130,16 @@ final class RecipeJob {
     /** The last frame submitted: its plan, and whether it was checked. */
     private LayerPlan lastPlan;
     private boolean lastChecked;
+    /** What drew each picture of the layered attempt. */
+    private final Map<StillHash, Uses> uses = new HashMap<>();
 
     // Drawn whole.
     private LayerLoop<Long> whole;
     private int wholeWidth, wholeHeight;
+    /** What drew each whole picture, by its fast hash. */
+    private final Map<Long, Uses> wholeUses = new HashMap<>();
+    /** What drew the whole frame the pipeline has not handed back yet. */
+    private Uses wholeInFlight;
 
     // What came out.
     private Mode mode;
@@ -138,9 +148,12 @@ final class RecipeJob {
     private List<Stored> stored;
     private int framesDrawn, clockLayers, clockStatic;
 
-    /** A submitted sequence frame: which layers it drew, and whether the real render was drawn with it. */
-    private record InFlight(int frame, LayerPlan plan, int[] layers, TileRenderer.Submission submission,
-                            boolean check) {
+    /**
+     * A submitted sequence frame: which layers it drew, what the recorder saw of each, and whether the real render was
+     * drawn with it.
+     */
+    private record InFlight(int frame, LayerPlan plan, int[] layers, LayerRecorder.Trace[] traces,
+                            TileRenderer.Submission submission, boolean check) {
     }
 
     RecipeJob(Tools tools, EmiRecipe recipe) {
@@ -196,15 +209,7 @@ final class RecipeJob {
         for (int i = 0; i < n; i++) {
             LayerPlan.Layer layer = plan.layers().get(i);
             boxes[i] = layer.box();
-            int at = i;
-            tiles.add(new TileRenderer.Tile(boxes[i], layer::draw, false, draw -> {
-                tools.recorder().start();
-                try {
-                    draw.run();
-                } finally {
-                    traces[at] = tools.recorder().stop();
-                }
-            }));
+            tiles.add(new TileRenderer.Tile(boxes[i], layer::draw, false, watch(traces, i)));
         }
         TileRenderer.Submission all = submit(plan, tiles);
         // Drawn while the GPU works on the layers. It lays the recipe out afresh, which closes the plan's LDLib UI as
@@ -233,6 +238,7 @@ final class RecipeJob {
         }
         for (int i = 0; i < n; i++) {
             if (!usable(first[i], i, 0)) return;
+            note(uses, first[i].hash(), traces[i]);
         }
 
         // Clock-only layers: drawn at two other times, each from a plan of its own, while the real render is on its
@@ -323,11 +329,15 @@ final class RecipeJob {
         boolean check = frame % CHECK_EVERY == 0;
         int[] layers = check ? animated : open();
         List<TileRenderer.Tile> tiles = new ArrayList<>(layers.length);
-        for (int i : layers) tiles.add(new TileRenderer.Tile(boxes[i], plan.layers().get(i)::draw, matte[i]));
+        LayerRecorder.Trace[] traces = new LayerRecorder.Trace[layers.length];
+        for (int k = 0; k < layers.length; k++) {
+            int i = layers[k];
+            tiles.add(new TileRenderer.Tile(boxes[i], plan.layers().get(i)::draw, matte[i], watch(traces, k)));
+        }
         TileRenderer.Submission submission = submit(plan, tiles);
         // Now, before the next frame ticks the atlas away from this one.
         if (check) startReference(plan.millis());
-        inFlight.add(new InFlight(frame, plan, layers, submission, check));
+        inFlight.add(new InFlight(frame, plan, layers, traces, submission, check));
         framesDrawn++;
         lastPlan = plan;
         lastChecked = check;
@@ -353,6 +363,7 @@ final class RecipeJob {
                 return false;
             }
             if (!usable(m, i, frame.frame())) return false;
+            note(uses, m.hash(), frame.traces()[k]);
             if (!loops[i].decided() && loops[i].offer(m.hash(), m::still)) undecided--;
             if (now != null) now[i] = m;
         }
@@ -395,11 +406,14 @@ final class RecipeJob {
         for (int i = 0; i < first.length; i++) {
             LayerLoop<StillHash> loop = loops == null ? null : loops[i];
             if (loop == null) {
-                out.add(new Stored(boxes[i], List.of(first[i].hash()), List.of(first[i].still())));
+                StillHash hash = first[i].hash();
+                out.add(new Stored(boxes[i], List.of(hash), List.of(first[i].still()),
+                        List.of(uses.getOrDefault(hash, Uses.NONE))));
                 continue;
             }
             List<StillHash> hashes = loop.stored();
-            out.add(new Stored(boxes[i], hashes, hashes.stream().map(loop::picture).toList()));
+            out.add(new Stored(boxes[i], hashes, hashes.stream().map(loop::picture).toList(),
+                    hashes.stream().map(hash -> uses.getOrDefault(hash, Uses.NONE)).toList()));
         }
         stored = out;
         mode = Mode.LAYERED;
@@ -519,6 +533,7 @@ final class RecipeJob {
         lastPlan = null;
         first = null;
         loops = null;
+        uses.clear();
     }
 
     // Drawn whole.
@@ -529,14 +544,7 @@ final class RecipeJob {
             RecipeRenderer.Pipeline pipeline = tools.whole();
             pipeline.discard();
             LayerRecorder.Trace[] trace = new LayerRecorder.Trace[1];
-            pipeline.draw(tools.minecraft(), recipe, BASE_MILLIS, draw -> {
-                tools.recorder().start();
-                try {
-                    draw.run();
-                } finally {
-                    trace[0] = tools.recorder().stop();
-                }
-            });
+            pipeline.draw(tools.minecraft(), recipe, BASE_MILLIS, watch(trace, 0));
             RecipeRenderer.Readback frame0 = pipeline.finish();
             wholeWidth = frame0.width;
             wholeHeight = frame0.height;
@@ -544,6 +552,7 @@ final class RecipeJob {
             Frame picture0 = frame0.frame();
             whole = new LayerLoop<>();
             whole.offer(hash0, () -> picture0);
+            note(wholeUses, hash0, trace[0]);
             boolean moves = trace[0].verdict() == LayerRecorder.Verdict.ANIMATED;
             if (trace[0].verdict() == LayerRecorder.Verdict.CLOCK) {
                 for (long millis : new long[]{BASE_MILLIS + FakeTime.FRAME_MILLIS, BASE_MILLIS + FAR_MILLIS}) {
@@ -571,17 +580,23 @@ final class RecipeJob {
         long start = System.nanoTime(), atlas = tools.timings().atlas;
         try {
             RecipeRenderer.Readback frame;
+            // The readback is of the frame drawn before, so it goes with the uses of that one.
+            Uses drawnBefore = wholeInFlight;
             if (nextFrame < FramePolicy.CAP) {
                 tickAtlas();
+                LayerRecorder.Trace[] trace = new LayerRecorder.Trace[1];
                 frame = tools.whole().draw(tools.minecraft(), recipe,
-                        BASE_MILLIS + nextFrame * FakeTime.FRAME_MILLIS);
+                        BASE_MILLIS + nextFrame * FakeTime.FRAME_MILLIS, watch(trace, 0));
+                wholeInFlight = trace[0].uses();
                 nextFrame++;
                 framesDrawn++;
             } else {
                 frame = tools.whole().finish();
+                wholeInFlight = null;
             }
             if (frame == null) return;
             long hash = RecipeRenderer.fastHash(frame.pixels, frame.size());
+            if (drawnBefore != null) wholeUses.merge(hash, drawnBefore, Uses::merge);
             if (!whole.offer(hash, frame::frame)) return;
             tools.whole().discard();
             finishWhole(whole.stored());
@@ -594,18 +609,39 @@ final class RecipeJob {
         Map<Long, StillHash> hashes = new HashMap<>();
         List<StillHash> stills = new ArrayList<>(keys.size());
         List<Frame> pictures = new ArrayList<>(keys.size());
+        List<Uses> drawnBy = new ArrayList<>(keys.size());
         for (long key : keys) {
             Frame picture = whole.picture(key);
             stills.add(hashes.computeIfAbsent(key, k -> StillHash.of(picture)));
             pictures.add(picture);
+            drawnBy.add(wholeUses.getOrDefault(key, Uses.NONE));
         }
-        stored = List.of(new Stored(new LayerPlan.Box(0, 0, wholeWidth, wholeHeight), stills, pictures));
+        stored = List.of(new Stored(new LayerPlan.Box(0, 0, wholeWidth, wholeHeight), stills, pictures, drawnBy));
         whole = null;
+        wholeUses.clear();
+        wholeInFlight = null;
         mode = Mode.FALLBACK;
         phase = Phase.DONE;
     }
 
     // Plumbing.
+
+    /** Brackets a draw with the recorder, and puts what it saw at {@code into[at]}. */
+    private TileRenderer.Bracket watch(LayerRecorder.Trace[] into, int at) {
+        return draw -> {
+            tools.recorder().start();
+            try {
+                draw.run();
+            } finally {
+                into[at] = tools.recorder().stop();
+            }
+        };
+    }
+
+    /** Adds what {@code trace} saw to what drew the picture {@code key}; a draw nobody watched adds nothing. */
+    private static <K> void note(Map<K, Uses> into, K key, LayerRecorder.Trace trace) {
+        if (trace != null) into.merge(key, trace.uses(), Uses::merge);
+    }
 
     private LayerPlan plan(long millis) {
         long start = System.nanoTime();

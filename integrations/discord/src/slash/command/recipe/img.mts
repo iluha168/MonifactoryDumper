@@ -3,7 +3,7 @@ import { ApplicationCommandOptionTypes } from "discordeno"
 import { SubCommand } from "../../lib/leaf/SubCommand.mts"
 import { recipes } from "../../../dump/recipes.mts"
 import { stills } from "../../../dump/stills.mts"
-import { drawRecipe } from "../../../picture/draw.mts"
+import { drawRecipe, pictureToAttachment } from "../../../picture/draw.mts"
 import { unique } from "../../../iterator/unique.mts"
 import { emojis } from "../config.mts"
 
@@ -47,7 +47,7 @@ export const commandRecipeImg = new SubCommand(
 
 				await interaction.edit({
 					content: notes.map((l) => `${emojis.info} ${l}`).join("\n"),
-					files: [{ name: drawn.name, blob: new Blob([drawn.bytes], { type: drawn.type }) }],
+					files: [pictureToAttachment(drawn)],
 				})
 			} catch (e) {
 				await interaction.edit(`${emojis.errorInternal} My bad, render failed.`)

@@ -3,6 +3,7 @@ package com.iluha168.monifactory.compare;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.iluha168.monifactory.imgencoder.Frame;
+import com.iluha168.monifactory.imgencoder.layered.StillTable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -39,6 +40,10 @@ class MergeShardsTest {
         final List<String> tsv = new ArrayList<>(List.of("record\tkey"));
         final List<String> render = new ArrayList<>();
         final Map<Long, Integer> stills = new HashMap<>();
+        /** Per still id, its row of still_uses.json. */
+        final List<String> uses = new ArrayList<>();
+        /** Rows by seed other than {@link #row}'s. */
+        final Map<Long, String> rows = new HashMap<>();
         int owned;
 
         Shard(int index, int count) {
@@ -62,8 +67,24 @@ class MergeShardsTest {
             return this;
         }
 
+        /** What drew the still of {@code seed}, from here on. */
+        Shard uses(long seed, String row) {
+            rows.put(seed, row);
+            return this;
+        }
+
+        /** The card's still is drawn from EMI's widget texture, a widget's from an item named after its seed. */
+        static String row(long seed) {
+            return seed == 0 ? "{\"textures\":[\"emi:textures/gui/widgets.png\"]}"
+                    : "{\"items\":[\"test:item_" + seed + "\"]}";
+        }
+
         private int still(long seed) {
-            return stills.computeIfAbsent(seed, s -> artifact.still(s == 0 ? CARD : card(6, 6, s)));
+            return stills.computeIfAbsent(seed, s -> {
+                int id = artifact.still(s == 0 ? CARD : card(6, 6, s));
+                uses.add(rows.getOrDefault(s, row(s)));
+                return id;
+            });
         }
 
         Path write(Path directory) throws IOException {
@@ -74,6 +95,7 @@ class MergeShardsTest {
             rows.addAll(render);
             Files.write(directory.resolve("render.tsv"), rows, StandardCharsets.UTF_8);
             Files.writeString(directory.resolve("categories.tsv"), "category\trecipes\tdropped\n", StandardCharsets.UTF_8);
+            StillTable.writeUses(directory.resolve(StillTable.USES), uses);
             return directory;
         }
     }
@@ -116,6 +138,33 @@ class MergeShardsTest {
         assertArrayEquals(Files.readAllBytes(a.resolve("stills.pak")), Files.readAllBytes(dir.resolve("out/stills.pak")));
     }
 
+    /** The rows of an artifact's still_uses.json, in still id order. */
+    private static List<String> uses(Path artifact) throws IOException {
+        List<String> out = new ArrayList<>();
+        for (String line : Files.readAllLines(artifact.resolve(StillTable.USES), StandardCharsets.UTF_8)) {
+            if (!line.equals("[") && !line.equals("]")) out.add(line.replaceAll(",$", ""));
+        }
+        return out;
+    }
+
+    @Test
+    void usesFollowTheirStillsAndAStillSeveralShardsDrewGetsEveryShardsUses() throws Exception {
+        Path s0 = new Shard(0, 2).listed("a").uses(20, "{\"items\":[\"test:b\"],\"texts\":[\"1 < 2\"]}")
+                .drawn("b", 20).listed("c").write(dir.resolve("0"));
+        Path s1 = new Shard(1, 2).uses(0, "{\"textures\":[\"test:card.png\",\"emi:textures/gui/widgets.png\"]}")
+                .drawn("a", 10).listed("b").uses(20, "{\"textures\":[\"test:t.png\"],\"items\":[\"test:b2\"]}")
+                .drawn("c", 20).write(dir.resolve("1"));
+        merge(dir.resolve("out"), s0, s1);
+
+        // a's widget is shard 1's still, b's and c's widgets one picture both shards drew.
+        assertEquals(List.of("a 0 1", "b 0 2", "c 0 2"), records(dir.resolve("out")));
+        assertEquals(List.of(
+                "{\"textures\":[\"test:card.png\",\"emi:textures/gui/widgets.png\"]}",
+                "{\"items\":[\"test:item_10\"]}",
+                "{\"textures\":[\"test:t.png\"],\"items\":[\"test:b\",\"test:b2\"],\"texts\":[\"1 < 2\"]}"),
+                uses(dir.resolve("out")));
+    }
+
     @Test
     void stillIdsFollowFirstReferenceInMergedOrder() throws Exception {
         // Shard 1 drew a and c, so its still ids are card 0, a's 1, c's 2; shard 0 drew b: card 0, b's 1.
@@ -146,7 +195,7 @@ class MergeShardsTest {
         // Handed over in the order they might have finished in.
         merge(dir.resolve("two"), s2, s0, s1);
 
-        for (String file : List.of("recipes.json", "stills.pak", "stills.json", "render.tsv", "meta.json",
+        for (String file : List.of("recipes.json", "stills.pak", "stills.json", StillTable.USES, "render.tsv", "meta.json",
                 "categories.tsv", VerifyArtifact.LANG, VerifyArtifact.MATTER_NAMES, VerifyArtifact.TAGS)) {
             assertArrayEquals(Files.readAllBytes(dir.resolve("one").resolve(file)),
                     Files.readAllBytes(dir.resolve("two").resolve(file)), file);

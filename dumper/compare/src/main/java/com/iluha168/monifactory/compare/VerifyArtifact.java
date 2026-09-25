@@ -9,6 +9,7 @@ import com.iluha168.monifactory.imgencoder.layered.LayeredImage;
 import com.iluha168.monifactory.imgencoder.layered.StillEntry;
 import com.iluha168.monifactory.imgencoder.layered.StillTable;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -35,7 +36,8 @@ import java.util.concurrent.Future;
  * box lies inside the canvas, every duration is positive, there is a layer 0), and its canvas is
  * {@code (w + 8) * scale} by {@code (h + 8) * scale} for the record's display size. And {@code meta.json} agrees with
  * both: the recipe and still counts, the pak's size, and {@code layered + fallback + failed == recipes}, where a
- * failed record is one whose image is null.
+ * failed record is one whose image is null. {@code still_uses.json}, where there is one, has a row per still, each an
+ * object of arrays of strings; artifacts from before it have none.
  * <p>
  * A data-only artifact, whose {@code meta.json} says {@code "images": false}, has no {@code stills.*}, null image
  * fields in its meta, and {@code "image": null} in every record.
@@ -142,6 +144,7 @@ public final class VerifyArtifact {
             }
         });
         checkCounts(artifact, failures, counts[0], counts[1], table.size(), pakSize);
+        verifyUses(artifact, failures, table.size());
 
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         try {
@@ -189,6 +192,50 @@ public final class VerifyArtifact {
             failures.add("meta.json counts " + layered + " layered and " + fallback + " fallback recipes, but "
                     + rendered + " records have a picture");
         }
+    }
+
+    /**
+     * {@code still_uses.json}: one row per still, each an object whose values are arrays of strings. An artifact from a
+     * renderer before it has none, which is not a failure.
+     */
+    private static void verifyUses(Artifact artifact, List<String> failures, int stills) throws IOException {
+        Path file = artifact.directory.resolve(StillTable.USES);
+        if (!Files.isRegularFile(file)) {
+            System.out.printf("%s: none, from a renderer before it%n", StillTable.USES);
+            return;
+        }
+        int rows = 0, before = failures.size();
+        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            for (String line; (line = reader.readLine()) != null; ) {
+                if (line.equals("[") || line.equals("]") || line.isEmpty()) continue;
+                int still = rows++;
+                JsonElement row;
+                try {
+                    row = JsonParser.parseString(line.endsWith(",") ? line.substring(0, line.length() - 1) : line);
+                } catch (JsonParseException e) {
+                    failures.add(StillTable.USES + " row " + still + " does not parse: " + e.getMessage());
+                    continue;
+                }
+                if (!row.isJsonObject()) {
+                    failures.add(StillTable.USES + " row " + still + " is not an object");
+                    continue;
+                }
+                for (Map.Entry<String, JsonElement> list : row.getAsJsonObject().entrySet()) {
+                    boolean strings = list.getValue().isJsonArray();
+                    if (strings) {
+                        for (JsonElement entry : list.getValue().getAsJsonArray()) {
+                            strings &= entry.isJsonPrimitive() && entry.getAsJsonPrimitive().isString();
+                        }
+                    }
+                    if (!strings) {
+                        failures.add(StillTable.USES + " row " + still + ": " + list.getKey()
+                                + " is not an array of strings");
+                    }
+                }
+            }
+        }
+        if (rows != stills) failures.add(StillTable.USES + " has " + rows + " rows for " + stills + " stills");
+        if (failures.size() == before) System.out.printf("%s: %,d rows%n", StillTable.USES, rows);
     }
 
     private static void expect(Artifact artifact, List<String> failures, String key, long actual, String what) {
@@ -289,7 +336,7 @@ public final class VerifyArtifact {
     }
 
     private static void verifyData(Artifact artifact, List<String> failures) throws IOException {
-        for (String file : new String[]{StillTable.PAK, StillTable.JSON, "render.tsv"}) {
+        for (String file : new String[]{StillTable.PAK, StillTable.JSON, StillTable.USES, "render.tsv"}) {
             if (Files.exists(artifact.directory.resolve(file))) {
                 failures.add("meta.json says the artifact has no images, but there is a " + file);
             }

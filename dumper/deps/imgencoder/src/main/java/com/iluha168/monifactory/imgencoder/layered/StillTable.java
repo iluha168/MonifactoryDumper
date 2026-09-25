@@ -20,6 +20,8 @@ public record StillTable(List<StillEntry> stills) {
     public static final String JSON = "stills.json";
     /** The pack's file name in an artifact. */
     public static final String PAK = "stills.pak";
+    /** What drew each still, a JSON object per still in id order, one row per line like {@link #JSON}. */
+    public static final String USES = "still_uses.json";
 
     public StillTable {
         stills = List.copyOf(stills);
@@ -58,6 +60,23 @@ public record StillTable(List<StillEntry> stills) {
                 out.write("[" + still.payload().offset() + "," + still.payload().length() + "," + still.width() + ","
                         + still.height() + "]");
                 out.write(id + 1 < stills.size() ? ",\n" : "\n");
+            }
+            out.write("]\n");
+        }
+        Files.move(partial, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    /**
+     * Writes {@link #USES} to {@code file}, whole or not at all: {@code rows}, each already a JSON object, as the
+     * elements of one array. Row {@code id} is still {@code id}'s.
+     */
+    public static void writeUses(Path file, List<String> rows) throws IOException {
+        Path partial = file.resolveSibling(file.getFileName() + ".part");
+        try (BufferedWriter out = Files.newBufferedWriter(partial, StandardCharsets.UTF_8)) {
+            out.write("[\n");
+            for (int id = 0; id < rows.size(); id++) {
+                out.write(rows.get(id));
+                out.write(id + 1 < rows.size() ? ",\n" : "\n");
             }
             out.write("]\n");
         }

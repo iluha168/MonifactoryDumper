@@ -23,6 +23,7 @@ build writes `dumper/build/dumps/<pack name>-<pack version>-data/`:
 recipes.json     every recipe, one JSON record per line                         contract
 stills.json      where each still is in stills.pak, and its size                contract, full build only
 stills.pak       every distinct still, lossless WebP, back to back               contract, full build only
+still_uses.json  what drew each still: textures, sprites, items, fluids, text   contract, full build only
 meta.json        what the artifact is: format, pack, sizes, counts              contract
 categories.tsv   every EMI category with its recipe count                       contract
 lang.json        every English translation, key to text                         contract
@@ -32,7 +33,8 @@ render.tsv       how each recipe was drawn                                      
 ```
 
 A data-only artifact has the same `recipes.json` records with every `image` null, `meta.json` saying `"images": false`,
-`categories.tsv`, `lang.json`, `matter_names.json` and `tags.json`. It has no `stills.*` and no `render.tsv`.
+`categories.tsv`, `lang.json`, `matter_names.json` and `tags.json`. It has no `stills.*`, no `still_uses.json` and no
+`render.tsv`.
 
 `meta.json` is written last. A directory without it is unfinished, whatever else it holds.
 
@@ -205,6 +207,36 @@ category is one still, and one layer's still may be another recipe's too. In 0.1
 still is used by some record. In artifacts the renderer or the shard merge wrote, ids are numbered in the order records
 first use them (record by record, layer by layer, entry by entry), so reading records in order reads `stills.pak`
 roughly front to back; a reader need not rely on that.
+
+## still_uses.json
+
+What the game used to draw each still: which textures and sprites, which items, models and fluids, which text. It is
+how a reader finds the pictures of an item or a fluid by its id, or the texture behind a picture.
+
+A JSON array with one row per line, like `stills.json`, and row `i` is still `i`'s: an object whose values are arrays
+of strings. A key whose array would be empty is left out, so a still nothing named went into is `{}`. Keys come in
+this order:
+
+| Key | Entries |
+|---|---|
+| `textures` | Every texture the draws sampled that the game's texture manager holds, by its location: `emi:textures/gui/widgets.png`, an atlas such as `minecraft:textures/atlas/blocks.png`, the lightmap items and text are drawn with (`minecraft:dynamic/light_map_1`). Font glyph pages are left out; `texts` has what they spell. So is a texture the manager does not hold, such as a render target or the item overlay. |
+| `sprites` | Every atlas sprite under the vertices drawn, by name, such as `minecraft:item/iron_ingot` or `minecraft:block/water_still`. Found from each primitive's texture coordinates, so it misses what a mod draws from a vertex buffer of its own; the atlas is in `textures` then. |
+| `models` | The item models the items were drawn from, by their location in the game's model manager, such as `minecraft:iron_ingot#inventory`. A model an item's overrides picked is in no such place and is missing here, while its item is in `items`. |
+| `items` | Every item drawn, by id, with its NBT right after it the way `/give` writes it, if it has any: `minecraft:iron_ingot`, `gtceu:fluid_cell{Fluid:{Amount:1000L,FluidName:"gtceu:oxygen"}}`. The ids are those of `matter_names.json`'s `item`. |
+| `fluids` | Every fluid whose sprite and tint the draws asked Forge for, by id, as in `matter_names.json`'s `fluid`. EMI's fluid stacks and GregTech's tanks both ask. |
+| `texts` | Every text drawn, as plain text without its formatting, one entry per string drawn: a stack count, a line of a GregTech recipe's description. |
+
+Each list holds an entry once, in the order the draws first used it. The renderer watches every draw whose picture it
+stores, so a layer that cycles through a tag's items has each item under the still that shows it. A still is one
+picture, and pictures are stored once: when several draws came out the same picture (the same empty slot in a
+thousand recipes, one item icon in many), its row lists what every one of them used. The textures and sprites of a
+layer are those of its stills together.
+
+```json
+{"textures":["emi:textures/gui/widgets.png","minecraft:textures/atlas/blocks.png","minecraft:dynamic/light_map_1"],"sprites":["minecraft:item/iron_ingot"],"models":["minecraft:iron_ingot#inventory"],"items":["minecraft:iron_ingot"]}
+```
+
+Artifacts from renderers before this file have none; a reader should expect that.
 
 ## Drawing a recipe at a tick
 
