@@ -67,7 +67,7 @@ export class StillTable {
 	}
 
 	/** Still `id`'s WebP file. */
-	webp(id: number): Uint8Array {
+	webp(id: number): Uint8Array<ArrayBuffer> {
 		const bytes = new Uint8Array(this.offsets[this.check(id) + 1] - this.offsets[id])
 		// Synchronous, so that no other read moves the file's position between the seek and the read.
 		this.pak.seekSync(this.offsets[id], Deno.SeekMode.Start)
