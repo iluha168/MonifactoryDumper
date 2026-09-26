@@ -31,6 +31,25 @@ export const bot = createBot({
 			type: true,
 			data: true,
 			token: true,
+			message: true,
+			user: true,
+		},
+		message: {
+			applicationId: true,
+			author: true,
+			components: true,
+			id: true,
+			interaction: true,
+			ephemeral: true,
+			loading: true,
+		},
+		user: {
+			id: true,
+		},
+		messageInteraction: {
+			name: true,
+			user: true,
+			id: true,
 		},
 	},
 })

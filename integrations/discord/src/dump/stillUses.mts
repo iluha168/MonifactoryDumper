@@ -2,7 +2,7 @@ import z from "zod"
 import { join } from "node:path"
 import { dumpDir } from "./path.mts"
 import { stills } from "./stills.mts"
-import { type MatterType, matterTypes } from "./matterNames.mts"
+import { matterNames, type MatterType, matterTypes } from "./matterNames.mts"
 import { recipes } from "./recipes.mts"
 import type { Layer } from "../picture/timeline.mts"
 
@@ -40,17 +40,68 @@ interface StillMatter {
 	readonly texts: Uint16Array
 }
 
+/** A matter of matter_names.json. */
+export interface Matter {
+	readonly type: MatterType
+	readonly id: string
+}
+
+/** What a recipe's picture shows, over every frame of every layer. */
+export interface DrawnMatter {
+	/**
+	 * Every matter its stills were drawn with. A still is one picture, stored once for every draw that came out the
+	 * same, so where two things look alike (Stone and Infested Stone), a still names both.
+	 */
+	readonly every: readonly Matter[]
+	/**
+	 * The matter of those stills whose matter all has one name, such as Lava and Flowing Lava: what the picture shows for
+	 * sure, as far as a player tells things apart.
+	 */
+	readonly sure: readonly Matter[]
+}
+
+/**
+ * Indices into {@link WidgetTable}'s matters, for each recipe of recipes.json by its index: list `r` is `values[starts[r]]`
+ * to `values[starts[r + 1] - 1]`.
+ */
+interface RecipeMatter {
+	readonly starts: Uint32Array
+	readonly values: Int32Array
+}
+
+function packRecipeMatter(lists: readonly (readonly number[] | null)[]): RecipeMatter {
+	const starts = new Uint32Array(lists.length + 1)
+	lists.forEach((list, r) => starts[r + 1] = starts[r] + (list?.length ?? 0))
+	const values = new Int32Array(starts[lists.length])
+	lists.forEach((list, r) => list && values.set(list, starts[r]))
+	return { starts, values }
+}
+
 /**
  * For every matter of matter_names.json, the recipe layer that shows it the clearest: its slot, as some recipe drew it,
  * animated if the slot is. Every still of the layer shows the matter, so a slot cycling through a tag is no widget of
- * any one of its entries. See still_uses.json in dumper/FORMAT.md.
+ * any one of its entries. See still_uses.json in dumper/FORMAT.md. Also what every recipe's picture shows.
  */
 export class WidgetTable {
-	private constructor(private readonly picks: Readonly<Record<MatterType, ReadonlyMap<string, Layer>>>) {}
+	private constructor(
+		private readonly picks: Readonly<Record<MatterType, ReadonlyMap<string, Layer>>>,
+		private readonly matters: readonly Matter[],
+		/** 1 for each recipe with a picture. */
+		private readonly pictured: Uint8Array,
+		private readonly every: RecipeMatter,
+		private readonly sure: RecipeMatter,
+	) {}
 
 	/** The layer showing `id` of `type` the clearest, if any recipe shows it at all. Its position is that in its recipe. */
 	widget(type: MatterType, id: string): Layer | undefined {
 		return this.picks[type].get(id)
+	}
+
+	/** What the picture of the recipe at `index` of recipes.json shows, if it has one. */
+	drawn(index: number): DrawnMatter | undefined {
+		if (!this.pictured[index]) return undefined
+		const read = ({ starts, values }: RecipeMatter) => Array.from(values.subarray(starts[index], starts[index + 1]), (matter) => this.matters[matter])
+		return { every: read(this.every), sure: read(this.sure) }
 	}
 
 	/** Goes through every layer of every recipe, keeping the one with the least {@link Rank} per matter, the first of equals. */
@@ -64,11 +115,29 @@ export class WidgetTable {
 			return found
 		}
 
+		/** What a player tells matter number `matter` by. */
+		const nameOf = (matter: number) => {
+			const [type, id] = matters[matter].split("\0") as [MatterType, string]
+			return `${type}\0${matterNames[type].get(id) ?? id}`
+		}
 		const best = new Map<number, Pick>()
+		const every: (number[] | null)[] = []
+		const sure: (number[] | null)[] = []
 		for (const recipe of recipes) {
-			if (!recipe.image) continue
+			if (!recipe.image) {
+				every.push(null)
+				sure.push(null)
+				continue
+			}
+			const drawn = new Set<number>()
+			const drawnSure = new Set<number>()
 			for (const layer of (await recipe.image.read()).layers) {
 				const distinct = [...new Set(layer.f)]
+				for (const still of distinct) {
+					const matter = new Set(shown.subarray(starts[still], starts[still + 1]))
+					for (const one of matter) drawn.add(one)
+					if (new Set(matter.values().map(nameOf)).size === 1) matter.forEach((one) => drawnSure.add(one))
+				}
 				const first = distinct[0]
 				candidates: for (let e = starts[first]; e < starts[first + 1]; e++) {
 					const matter = shown[e]
@@ -82,6 +151,8 @@ export class WidgetTable {
 					if (!known || compare(rank, known.rank) < 0) best.set(matter, { layer, rank })
 				}
 			}
+			every.push([...drawn])
+			sure.push([...drawnSure])
 		}
 
 		const picks = Object.fromEntries(matterTypes.map((type) => [type, new Map<string, Layer>()])) as Record<MatterType, Map<string, Layer>>
@@ -89,7 +160,17 @@ export class WidgetTable {
 			const [type, id] = matters[matter].split("\0") as [MatterType, string]
 			picks[type].set(id, layer)
 		}
-		return new WidgetTable(picks)
+		const decoded = matters.map((matter) => {
+			const [type, id] = matter.split("\0") as [MatterType, string]
+			return { type, id }
+		})
+		return new WidgetTable(
+			picks,
+			decoded,
+			Uint8Array.from(recipes, (recipe) => recipe.image ? 1 : 0),
+			packRecipeMatter(every),
+			packRecipeMatter(sure),
+		)
 	}
 }
 
