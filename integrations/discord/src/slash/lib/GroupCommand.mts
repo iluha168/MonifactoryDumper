@@ -1,6 +1,6 @@
-import { ApplicationCommandTypes, CreateApplicationCommand, InteractionDataOption } from "discordeno"
+import { ApplicationCommandTypes, CreateApplicationCommand } from "discordeno"
 import { SubCommand } from "./leaf/SubCommand.mts"
-import { BaseCommand, Interaction } from "./BaseCommand.mts"
+import { BaseCommand, Interaction, InteractionData, InteractionMessage } from "./BaseCommand.mts"
 import type { TopLevelLikeCommand } from "./CommandRegistry.mts"
 
 export class GroupCommand extends BaseCommand implements TopLevelLikeCommand {
@@ -27,15 +27,32 @@ export class GroupCommand extends BaseCommand implements TopLevelLikeCommand {
 		))
 	}
 
-	async handle(interaction: Interaction, options: InteractionDataOption[]): Promise<void> {
-		const cmd = options.at(0)
+	private getSubCommand(name: string) {
+		const handler = this.handlers.get(name)
+		if (!handler) {
+			throw new Error(`Unknown sub-command "${name}"`)
+		}
+		return handler
+	}
+
+	async handleApplicationCommand(interaction: Interaction, data: InteractionData): Promise<void> {
+		const cmd = data.options?.at(0)
 		if (!cmd) {
 			throw new Error("No sub-command provided")
 		}
-		const handler = this.handlers.get(cmd.name)
-		if (!handler) {
-			throw new Error(`Unknown sub-command "${cmd.name}"`)
+		await this.getSubCommand(cmd.name).handleApplicationCommand(interaction, { ...data, options: cmd.options ?? [] })
+	}
+
+	async handleApplicationCommandAutocomplete(interaction: Interaction, data: InteractionData): Promise<void> {
+		const cmd = data.options?.at(0)
+		if (!cmd) {
+			throw new Error("No sub-command provided")
 		}
-		await handler.handle(interaction, cmd.options ?? [])
+		await this.getSubCommand(cmd.name).handleApplicationCommandAutocomplete(interaction, { ...data, options: cmd.options ?? [] })
+	}
+
+	override async handleMessageComponent(interaction: Interaction, data: InteractionData, message: InteractionMessage): Promise<void> {
+		const cmd = this.getSubCommand(message.interaction!.name.split(" ", 2)[1])
+		await cmd.handleMessageComponent(interaction, data, message)
 	}
 }
