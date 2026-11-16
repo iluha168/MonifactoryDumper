@@ -47,7 +47,6 @@ const slotless = new Set([
 	"gtceu:ore_vein_diagram",
 	"gtceu:bedrock_fluid_diagram",
 	"gtceu:programmed_circuit",
-	"nuclearcraft:particle_info",
 ])
 
 /** Where a player sees a thing on a recipe. */

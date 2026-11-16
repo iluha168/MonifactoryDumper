@@ -293,6 +293,8 @@ val installForge = tasks.register<JavaExec>("installForge") {
 // The instance: the pack, and whatever the game writes next to it. Forge and vanilla stay in their
 // own directories so no two tasks ever write to the same tree.
 val instanceDir = layout.buildDirectory.dir("instance")
+/** What the last installPack laid into [instanceDir] from the pack, one relative path a line. */
+val installedPackList = layout.buildDirectory.file("instance-pack-files.txt")
 
 val installPack = tasks.register<Sync>("installPack") {
     group = "modpack"
@@ -312,6 +314,54 @@ val installPack = tasks.register<Sync>("installPack") {
         exclude("mods/**")
         exclude("resourcepacks/**")
         exclude("shaderpacks/**")
+    }
+
+    // Except what an older pack put there. preserve cannot tell a script 0.13.8 shipped from a log the game wrote, and
+    // a dropped kubejs script still runs, so the files the pack laid down are listed, and the next install deletes
+    // those the new pack no longer has.
+    val packFiles = pack.get().incoming.files
+    val instance = instanceDir.get().asFile
+    val installed = installedPackList.get().asFile
+    doFirst(DropPackLeftovers(packFiles, instance, installed))
+    doLast(ListPackFiles(packFiles, installed))
+}
+
+/**
+ * Deletes from [instance] every file [installed] says the last install laid down and the pack in [packFiles] no
+ * longer has, then the directories that leaves empty. An instance from before the list existed only gets a warning.
+ */
+class DropPackLeftovers(
+    private val packFiles: FileCollection, private val instance: File, private val installed: File,
+) : Action<Task> {
+    override fun execute(task: Task) {
+        if (!installed.isFile) {
+            if (instance.resolve("manifest.json").isFile) {
+                task.logger.warn("$installed is missing, so files an older pack shipped and this one dropped may " +
+                    "still be in $instance. Delete the instance directory if the pack changed.")
+            }
+            return
+        }
+        val current = filesOf(packFiles.singleFile)
+        val dropped = installed.readLines().filter { it.isNotEmpty() && it !in current }
+        for (path in dropped) {
+            var file = instance.resolve(path)
+            if (!file.delete()) continue
+            file = file.parentFile
+            while (file != instance && file.list()?.isEmpty() == true && file.delete()) file = file.parentFile
+        }
+        if (dropped.isNotEmpty()) task.logger.lifecycle("deleted ${dropped.size} files the pack no longer ships")
+    }
+
+    companion object {
+        fun filesOf(root: File): Set<String> =
+            root.walk().filter { it.isFile }.map { it.relativeTo(root).invariantSeparatorsPath }.toSet()
+    }
+}
+
+/** Writes [installed]: every file of the pack in [packFiles], relative to it. */
+class ListPackFiles(private val packFiles: FileCollection, private val installed: File) : Action<Task> {
+    override fun execute(task: Task) {
+        installed.writeText(DropPackLeftovers.filesOf(packFiles.singleFile).sorted().joinToString("\n", postfix = "\n"))
     }
 }
 

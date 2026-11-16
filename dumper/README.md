@@ -269,6 +269,10 @@ pin that has gone stale cannot compile the renderer against the wrong Minecraft.
      if the timer's did, and `every atlas tick ticks every animated sprite` if the atlases' did, and `animated sprites back on their first frame`
      counts the sprites it could not rewind if the loop's did.
 
+   `installPack` keeps everything the game wrote into the instance, but not what an older pack shipped and this one
+   dropped: a kubejs script left behind still runs. It lists the pack's files in `dumper/build/instance-pack-files.txt`
+   and deletes the ones the next pack no longer has. An instance from before that list only gets a warning; delete `dumper/build/instance` then.
+
 3. Re-check the loop detection on the new pack: a layer is stored as one period of its animation, and the early stop
    that finds the period must agree with drawing all 400 frames. One boot records raw frame hashes, then the frame
    policy is checked offline on them:
